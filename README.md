@@ -12,6 +12,68 @@
   </p>
 </div>
 
+> **注意：本仓库为 [nanobot](https://github.com/HKUDS/nanobot) 的个人优化分支（nanobot-opt），在原版基础上新增了模型路由、Token 统计等功能。原版文档见下方。**
+
+## nanobot-opt 改动说明
+
+本分支在 nanobot 原版之上做了以下改动，所有改动完全向后兼容，不填新配置项则行为与原版一致。
+
+### 1. Per-session 并发锁
+
+原版使用全局锁，多用户场景下 A 用户处理消息时 B 用户必须等待。本分支改为 per-session 字典锁，各用户会话互不阻塞。
+
+### 2. 工具并行执行
+
+原版对 LLM 一次返回的多个工具调用逐个串行执行。本分支改用 `asyncio.gather` 并行执行，减少等待时间。
+
+### 3. Token 用量统计
+
+每轮对话的 token 消耗（输入/输出）累加存入 session 元数据。在 Telegram 频道中可通过 `/usage` 命令查看当前会话的累计用量。
+
+> 注意：`/usage` 命令目前仅在 Telegram 频道实现了中文界面，其他频道（飞书、Discord 等）未做修改。
+
+### 4. 多档模型路由
+
+新增 `nanobot/agent/router.py`，根据消息特征自动选择不同档位的模型，降低 API 费用。
+
+**路由规则（优先级从高到低）：**
+
+| 档位 | 触发条件 | 典型用途 |
+|------|---------|----------|
+| `heavy` | 消息 ≥300 字，或含编程/分析类关键词，或含代码块/步骤模式 | 代码生成、复杂推理 |
+| `fast` | 消息 ≤30 字且不触发 heavy | 简单问答、日常闲聊 |
+| `normal` | 其他 | 一般任务（默认兜底）|
+
+**自动升格**：当模型返回 `finish_reason=length`（回复被截断）时，自动升级到下一档模型重试（fast→normal→heavy）。
+
+**错误降级**：当路由模型返回错误时，自动回退到配置的默认模型重试。
+
+**启用方式**（`~/.nanobot/config.json`）：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-opus-4-5",
+      "routingEnabled": true,
+      "modelFast": "anthropic/claude-haiku-4-5",
+      "modelNormal": "anthropic/claude-sonnet-4-5",
+      "modelHeavy": "anthropic/claude-opus-4-5"
+    }
+  }
+}
+```
+
+不填 `routingEnabled` 或设为 `false` 则路由不启用，行为与原版完全一致。
+
+### 5. Telegram 频道中文界面
+
+Telegram 频道的命令菜单描述、`/start`、`/help` 回复内容改为中文。新增 `/usage` 命令入口。
+
+> 其他频道（飞书、Discord、企业微信等）的界面语言未做修改。
+
+---
+
 🐈 **nanobot** is an **ultra-lightweight** personal AI assistant inspired by [OpenClaw](https://github.com/openclaw/openclaw).
 
 ⚡️ Delivers core agent functionality with **99% fewer lines of code** than OpenClaw.
