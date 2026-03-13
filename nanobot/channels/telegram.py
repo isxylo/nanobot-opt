@@ -160,11 +160,12 @@ class TelegramChannel(BaseChannel):
 
     # Commands registered with Telegram's command menu
     BOT_COMMANDS = [
-        BotCommand("start", "Start the bot"),
-        BotCommand("new", "Start a new conversation"),
-        BotCommand("stop", "Stop the current task"),
-        BotCommand("help", "Show available commands"),
-        BotCommand("restart", "Restart the bot"),
+        BotCommand("start", "启动机器人"),
+        BotCommand("new", "开始新对话"),
+        BotCommand("stop", "停止当前任务"),
+        BotCommand("restart", "重启机器人"),
+        BotCommand("usage", "查看 Token 用量"),
+        BotCommand("help", "显示帮助信息"),
     ]
 
     def __init__(self, config: TelegramConfig, bus: MessageBus):
@@ -223,6 +224,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
+        self._app.add_handler(CommandHandler("usage", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
 
         # Add message handler for text, photos, voice, documents
@@ -421,9 +423,9 @@ class TelegramChannel(BaseChannel):
 
         user = update.effective_user
         await update.message.reply_text(
-            f"👋 Hi {user.first_name}! I'm nanobot.\n\n"
-            "Send me a message and I'll respond!\n"
-            "Type /help to see available commands."
+            f"👋 你好 {user.first_name}！我是 nanobot。\n\n"
+            "发消息给我，我会回复你！\n"
+            "输入 /help 查看可用命令。"
         )
 
     async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -431,10 +433,12 @@ class TelegramChannel(BaseChannel):
         if not update.message:
             return
         await update.message.reply_text(
-            "🐈 nanobot commands:\n"
-            "/new — Start a new conversation\n"
-            "/stop — Stop the current task\n"
-            "/help — Show available commands"
+            "🐈 nanobot 命令列表：\n"
+            "/new — 开始新对话\n"
+            "/stop — 停止当前任务\n"
+            "/restart — 重启机器人\n"
+            "/usage — 查看 Token 用量\n"
+            "/help — 显示帮助信息"
         )
 
     @staticmethod

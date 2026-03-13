@@ -29,13 +29,7 @@ class ModelRouter:
     保守策略：宁可 normal 不误降级到 fast。
     """
 
-    FAST_MAX_CHARS = 60
-    FAST_MAX_HISTORY = 2
-    FAST_KEYWORDS = {
-        "你好", "谢谢", "谢谢你", "感谢", "嗯", "好的", "明白", "知道了",
-        "hi", "hello", "thanks", "thank you", "ok", "okay", "got it",
-        "bye", "再见", "拜拜",
-    }
+    FAST_MAX_CHARS = 30
 
     HEAVY_MIN_CHARS = 300
     HEAVY_KEYWORDS = {
@@ -55,6 +49,20 @@ class ModelRouter:
     def __init__(self, tier_models: dict[str, str]):
         self.tier_models = tier_models
         self._heavy_re = re.compile("|".join(self.HEAVY_PATTERNS), re.IGNORECASE)
+
+    # Tier upgrade chain
+    _UPGRADE = {
+        ComplexityTier.FAST: ComplexityTier.NORMAL,
+        ComplexityTier.NORMAL: ComplexityTier.HEAVY,
+    }
+
+    def upgrade(self, tier: str) -> RouteResult | None:
+        """Return next-tier RouteResult, or None if already at HEAVY."""
+        next_tier = self._UPGRADE.get(tier)
+        if not next_tier:
+            return None
+        model = self.tier_models.get(next_tier, self.tier_models.get(ComplexityTier.NORMAL, ""))
+        return RouteResult(tier=next_tier, model=model, reason=f"upgraded_from={tier}")
 
     def route(self, message: str, history_len: int) -> RouteResult:
         tier, reason = self._classify(message, history_len)
@@ -77,14 +85,9 @@ class ModelRouter:
         if self._heavy_re.search(msg):
             return ComplexityTier.HEAVY, "pattern_match"
 
-        # FAST：所有条件同时满足才触发
-        if (
-            len(msg) <= self.FAST_MAX_CHARS
-            and history_len <= self.FAST_MAX_HISTORY
-            and any(kw in msg_lower for kw in self.FAST_KEYWORDS)
-        ):
-            matched = next(kw for kw in self.FAST_KEYWORDS if kw in msg_lower)
-            return ComplexityTier.FAST, f"keyword={matched!r},history={history_len}"
+        # FAST：短消息且不触发 HEAVY
+        if len(msg) <= self.FAST_MAX_CHARS:
+            return ComplexityTier.FAST, f"len={len(msg)}<={self.FAST_MAX_CHARS}"
 
         return ComplexityTier.NORMAL, "default"
 

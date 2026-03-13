@@ -197,6 +197,7 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         total_usage: dict[str, int] = {}
+        last_finish_reason: str | None = None
         model = model_override or self.model
 
         while iteration < self.max_iterations:
@@ -213,6 +214,7 @@ class AgentLoop:
             # Accumulate token usage
             for k, v in (response.usage or {}).items():
                 total_usage[k] = total_usage.get(k, 0) + v
+            last_finish_reason = response.finish_reason
 
             if response.has_tool_calls:
                 if on_progress:
@@ -274,7 +276,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages, total_usage
+        return final_content, tools_used, messages, total_usage, last_finish_reason
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -385,7 +387,7 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs, usage = await self._run_agent_loop(messages)
+            final_content, _, all_msgs, usage, _ = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history), usage)
             self.sessions.save(session)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
@@ -422,14 +424,26 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
         if cmd == "/help":
-            total = session.metadata.get("total_tokens", 0)
-            stats = f" ({total:,} tokens used)" if total else ""
             lines = [
-                "🐈 nanobot commands:",
-                "/new — Start a new conversation",
-                "/stop — Stop the current task",
-                "/restart — Restart the bot",
-                f"/help — Show available commands{stats}",
+                "🐈 nanobot 命令列表：",
+                "/new — 开始新对话",
+                "/stop — 停止当前任务",
+                "/restart — 重启机器人",
+                "/usage — 查看 Token 用量",
+                "/help — 显示帮助信息",
+            ]
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
+            )
+        if cmd == "/usage":
+            prompt = session.metadata.get("prompt_tokens", 0)
+            completion = session.metadata.get("completion_tokens", 0)
+            total = prompt + completion
+            lines = [
+                "📊 本次会话 Token 用量：",
+                f"  输入：{prompt:,}",
+                f"  输出：{completion:,}",
+                f"  合计：{total:,}",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
@@ -467,11 +481,26 @@ class AgentLoop:
                 route.tier, route.model, route.reason, msg.content[:40],
             )
 
-        final_content, _, all_msgs, usage = await self._run_agent_loop(
+        current_tier = route.tier if self.router else None
+        final_content, _, all_msgs, usage, finish_reason = await self._run_agent_loop(
             initial_messages,
             model_override=model_to_use,
             on_progress=on_progress or _bus_progress,
         )
+
+        # Upgrade to next tier if response was truncated
+        if finish_reason == "length" and self.router and current_tier:
+            upgraded = self.router.upgrade(current_tier)
+            if upgraded:
+                logger.warning(
+                    "Response truncated (length), upgrading {} -> {} ({})",
+                    current_tier, upgraded.tier, upgraded.model,
+                )
+                final_content, _, all_msgs, usage, _ = await self._run_agent_loop(
+                    initial_messages,
+                    model_override=upgraded.model,
+                    on_progress=on_progress or _bus_progress,
+                )
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
