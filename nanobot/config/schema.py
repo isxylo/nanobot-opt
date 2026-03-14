@@ -49,6 +49,7 @@ class FeishuConfig(Base):
         "THUMBSUP"  # Emoji type for message reactions (e.g. THUMBSUP, OK, DONE, SMILE)
     )
     group_policy: Literal["open", "mention"] = "mention"  # "mention" responds when @mentioned, "open" responds to all
+    reply_to_message: bool = False  # If True, bot replies quote the user's original message
 
 
 class DingTalkConfig(Base):
@@ -199,6 +200,7 @@ class QQConfig(Base):
     allow_from: list[str] = Field(
         default_factory=list
     )  # Allowed user openids (empty = public access)
+    msg_format: Literal["plain", "markdown"] = "plain"  # Message format: plain text or markdown
 
 
 class WecomConfig(Base):
