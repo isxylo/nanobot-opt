@@ -308,7 +308,25 @@ class WebFetchTool(Tool):
             return json.dumps({"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False)
         except Exception as e:
             logger.error("WebFetch error for {}: {}", url, e)
-            return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
+            err_str = str(e)
+            # 检测 CF 盾 / JS 渲染失败，提示 AI 使用浏览器工具
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            is_cf_block = (
+                status in (403, 503)
+                or "cloudflare" in err_str.lower()
+                or "cf-ray" in err_str.lower()
+                or "challenge" in err_str.lower()
+                or "just a moment" in err_str.lower()
+            )
+            if is_cf_block:
+                logger.warning("WebFetch blocked by CF/JS protection for {}, suggesting browser fallback", url)
+                return json.dumps({
+                    "error": "该页面受 Cloudflare 或 JS 渲染保护，普通 HTTP 请求被拦截。",
+                    "url": url,
+                    "suggestion": "请改用 jshook MCP 的浏览器工具（如 browser_navigate + browser_get_text）访问此页面。",
+                    "fallback": "jshook_browser",
+                }, ensure_ascii=False)
+            return json.dumps({"error": err_str, "url": url}, ensure_ascii=False)
 
     def _to_markdown(self, html_content: str) -> str:
         """Convert HTML to markdown."""

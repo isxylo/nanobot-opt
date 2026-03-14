@@ -500,6 +500,17 @@ class AgentLoop:
                     lines.append(f"  Normal：{normal} 次 ({normal * 100 // total_routed}%)")
                     lines.append(f"  Heavy ：{heavy} 次 ({heavy * 100 // total_routed}%)")
 
+            # 历史累计统计
+            global_stats = self._load_global_stats()
+            g_total = global_stats.get("total_tokens", 0)
+            if g_total > 0:
+                lines.append("")
+                lines.append("📈 历史累计 Token 用量：")
+                lines.append(f"  合计：{_fmt(g_total)}")
+                sessions_count = global_stats.get("sessions", 0)
+                if sessions_count:
+                    lines.append(f"  会话数：{sessions_count}")
+
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
             )
@@ -577,11 +588,38 @@ class AgentLoop:
             metadata=msg.metadata or {},
         )
 
+    def _load_global_stats(self) -> dict:
+        """Load global cumulative usage stats from workspace."""
+        path = self.workspace / "usage_stats.json"
+        if not path.exists():
+            return {}
+        try:
+            import json as _json
+            return _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _update_global_stats(self, usage: dict) -> None:
+        """Accumulate usage into workspace-level stats file."""
+        import json as _json
+        path = self.workspace / "usage_stats.json"
+        stats = self._load_global_stats()
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            stats[k] = stats.get(k, 0) + usage.get(k, 0)
+        # total_tokens may not be provided by all providers
+        if "total_tokens" not in usage:
+            stats["total_tokens"] = stats.get("total_tokens", 0) + usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+        try:
+            path.write_text(_json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
     def _save_turn(self, session: Session, messages: list[dict], skip: int, usage: dict | None = None) -> None:
         """Save new-turn messages into session, truncating large tool results."""
         if usage:
             for k, v in usage.items():
                 session.metadata[k] = session.metadata.get(k, 0) + v
+            self._update_global_stats(usage)
         from datetime import datetime
         for m in messages[skip:]:
             entry = dict(m)
