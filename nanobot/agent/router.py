@@ -169,6 +169,9 @@ class ModelRouter:
         logger.debug("ModelRouter: tier={} reason={} model={}", tier, reason, model)
         return RouteResult(tier=tier, model=model, reason=reason)
 
+    # 历史轮数超过此值时，FAST 自动升为 NORMAL（上下文复杂度上升）
+    FAST_MAX_HISTORY = 10
+
     def _classify(self, message: str, history_len: int) -> tuple[str, str]:
         msg = message.strip()
         msg_lower = msg.lower()
@@ -190,6 +193,9 @@ class ModelRouter:
 
         if any(kw in msg_lower for kw in self.FAST_EXPLICIT):
             matched = next(kw for kw in self.FAST_EXPLICIT if kw in msg_lower)
+            # 历史轮数过多时升为 NORMAL（上下文复杂，fast 模型容易丢失上下文）
+            if history_len > self.FAST_MAX_HISTORY:
+                return ComplexityTier.NORMAL, f"explicit={matched!r},history_upgrade={history_len}"
             return ComplexityTier.FAST, f"explicit={matched!r}"
 
         return ComplexityTier.NORMAL, "default"

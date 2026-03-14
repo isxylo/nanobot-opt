@@ -103,6 +103,7 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-session locks
         self._session_pending: dict[str, int] = {}  # per-session pending count
+        self._session_queued: dict[str, list[InboundMessage]] = {}  # per-session queued msgs for drain merge
         self._max_pending_per_session = 3  # 超过此数量的排队消息直接丢弃
         self.router = router
         self.memory_consolidator = MemoryConsolidator(
@@ -316,15 +317,26 @@ class AgentLoop:
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
         tasks = self._active_tasks.pop(msg.session_key, [])
-        cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
+        active_tasks = [t for t in tasks if not t.done()]
+        pending_count = self._session_pending.get(msg.session_key, 0)
+
+        cancelled = sum(1 for t in active_tasks if t.cancel())
         for t in tasks:
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
         sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
+        self._session_pending.pop(msg.session_key, None)
+
         total = cancelled + sub_cancelled
-        content = f"Stopped {total} task(s)." if total else "No active task to stop."
+        if total:
+            parts = [f"已停止 {total} 个任务"]
+            if pending_count > 1:
+                parts.append(f"（队列中还有 {pending_count - 1} 条消息已清除）")
+            content = "。".join(parts) + "。"
+        else:
+            content = "当前没有正在执行的任务。"
         await self.bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=content,
         ))
@@ -344,7 +356,7 @@ class AgentLoop:
         asyncio.create_task(_do_restart())
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message under the per-session lock, with pending queue cap."""
+        """Process a message under the per-session lock, with pending queue cap and drain merge."""
         key = msg.session_key
         pending = self._session_pending.get(key, 0)
         if pending >= self._max_pending_per_session:
@@ -357,11 +369,40 @@ class AgentLoop:
                 content="消息队列已满，请等待当前任务完成后再发送。",
             ))
             return
-        self._session_pending[key] = pending + 1
+
+        # 如果当前 session 正在处理中（有 pending），把消息加入等待队列
+        # 等锁释放后合并处理，避免多次串行调用 LLM
+        if pending > 0:
+            self._session_queued.setdefault(key, []).append(msg)
+            self._session_pending[key] = pending + 1
+            logger.debug("Session {} queued message for drain merge: {!r}", key, msg.content[:40])
+            return
+
+        self._session_pending[key] = 1
         try:
             async with self._get_session_lock(key):
+                # 合并等待队列中的消息
+                queued = self._session_queued.pop(key, [])
+                if queued:
+                    combined = msg.content + "\n\n" + "\n\n".join(
+                        f"[后续消息 {i+1}]: {q.content}" for i, q in enumerate(queued)
+                    )
+                    logger.info(
+                        "Session {} drain-merging {} queued messages into one",
+                        key, len(queued),
+                    )
+                    merged_msg = InboundMessage(
+                        channel=msg.channel,
+                        sender_id=msg.sender_id,
+                        chat_id=msg.chat_id,
+                        content=combined,
+                        metadata=msg.metadata or {},
+                    )
+                    process_msg = merged_msg
+                else:
+                    process_msg = msg
                 try:
-                    response = await self._process_message(msg)
+                    response = await self._process_message(process_msg)
                     if response is not None:
                         await self.bus.publish_outbound(response)
                     elif msg.channel == "cli":
@@ -379,11 +420,8 @@ class AgentLoop:
                         content="Sorry, I encountered an error.",
                     ))
         finally:
-            remaining = self._session_pending.get(key, 1) - 1
-            if remaining <= 0:
-                self._session_pending.pop(key, None)
-            else:
-                self._session_pending[key] = remaining
+            self._session_pending.pop(key, None)
+            self._session_queued.pop(key, None)
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
@@ -487,7 +525,7 @@ class AgentLoop:
                 f"  合计：{_fmt(total)}",
             ]
 
-            # 路由 tier 统计（仅路由启用时显示）
+            # 路由 tier 统计 + 节费估算（仅路由启用时显示）
             if self.router:
                 fast = session.metadata.get("route_fast", 0)
                 normal = session.metadata.get("route_normal", 0)
@@ -499,6 +537,11 @@ class AgentLoop:
                     lines.append(f"  Fast  ：{fast} 次 ({fast * 100 // total_routed}%)")
                     lines.append(f"  Normal：{normal} 次 ({normal * 100 // total_routed}%)")
                     lines.append(f"  Heavy ：{heavy} 次 ({heavy * 100 // total_routed}%)")
+                    # 节费估算：假设无路由时全部走 normal，计算 fast 节省的调用次数
+                    # 节省比例 = fast 占总请求的比例（fast 比 normal 便宜）
+                    if fast > 0 and total_routed > 0:
+                        saved_pct = fast * 100 // total_routed
+                        lines.append(f"  💰 路由节省估算：约 {saved_pct}% 的请求用了低价模型")
 
             # 历史累计统计
             global_stats = self._load_global_stats()
