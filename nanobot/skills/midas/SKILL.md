@@ -22,7 +22,7 @@ metadata: {"nanobot":{"emoji":"🏗️"}}
 
 ## API 调用方式
 
-使用 Python + requests 发送请求：
+使用 Python + requests 发送请求，**发送前必须用 jsonschema 验证请求体**：
 
 ```python
 import requests, json
@@ -35,13 +35,37 @@ headers = {
     "MAPI-Key": mapi_key
 }
 
-# POST / PUT 请求（带 body）
+# 加载 API 文档
+with open('/root/.nanobot/workspace/midas_api.json') as f:
+    api_docs = json.load(f)
+
+def validate_body(uri: str, body: dict) -> None:
+    """发送前验证请求体是否符合 Schema，不符合直接抛出异常。"""
+    import jsonschema
+    # 找到对应接口的 schema
+    entry = next((v for v in api_docs.values() if v.get('uri') == uri.lstrip('/')), None)
+    if not entry or not entry.get('schema'):
+        return  # 没有 schema 则跳过验证
+    try:
+        schema = json.loads(entry['schema']) if isinstance(entry['schema'], str) else entry['schema']
+        # schema 顶层是 {"API_NAME": {actual_schema}}，取内层
+        if len(schema) == 1:
+            schema = list(schema.values())[0]
+        jsonschema.validate(instance=body, schema=schema)
+    except jsonschema.ValidationError as e:
+        raise ValueError(f"请求体验证失败: {e.message}\n路径: {list(e.path)}")
+    except json.JSONDecodeError:
+        pass  # schema 解析失败则跳过验证
+
 def midas_api(method, sub_url, body=None):
+    # 发送前验证
+    if body and method in ("POST", "PUT"):
+        validate_body(sub_url, body)
     url = base_url + sub_url
     if method in ("POST", "PUT"):
-        r = requests.request(method, url, headers=headers, json=body, timeout=30)
+        r = requests.request(method, url, headers=headers, json=body, timeout=120)
     else:
-        r = requests.request(method, url, headers=headers, timeout=30)
+        r = requests.request(method, url, headers=headers, timeout=120)
     return r.json()
 ```
 
