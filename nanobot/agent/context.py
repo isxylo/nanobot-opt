@@ -94,7 +94,15 @@ Your workspace is at: {workspace_path}
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Ask for clarification when the request is ambiguous.
 
-Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
+Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.
+
+## Memory Convention
+
+When writing to MEMORY.md, use this structure:
+- `# now` — Current state: active tasks, open questions, key decisions. Keep under 30 lines. This section is always loaded into context.
+- `# History` — Append-only log. Add a `## YYYY-MM-DD HH:MM` heading at the start of each session summary.
+
+Move completed items from `# now` to `# History`. Keep `# now` actionable and concise."""
 
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:

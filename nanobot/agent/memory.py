@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import weakref
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -12,6 +13,55 @@ from typing import TYPE_CHECKING, Any, Callable
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
+
+# ---------------------------------------------------------------------------
+# Memory Snapshot (分级加载)
+# ---------------------------------------------------------------------------
+
+MEMORY_INLINE_LINES = 30  # 行数阈值：超过此值只注入 # now 节 + 结构摘要
+
+
+@dataclass
+class MemorySnapshot:
+    """Snapshot of MEMORY.md with tiered loading based on file size."""
+    exists: bool
+    full_content: str | None        # ≤30行：完整内容
+    first_section: str | None       # >30行：# now 节内容
+    outline: list[str] = field(default_factory=list)  # >30行：各节标题
+    total_lines: int = 0
+    file_path: str = ""
+
+
+def _extract_section(content: str, heading: str) -> str | None:
+    """Extract content of a top-level '# heading' section (until next '# ' heading)."""
+    lines = content.splitlines()
+    in_section = False
+    result = []
+    for line in lines:
+        if line.strip().lower() == heading.lower():
+            in_section = True
+            continue
+        if in_section and line.startswith("# ") and line.strip().lower() != heading.lower():
+            break
+        if in_section:
+            result.append(line)
+    return "\n".join(result).strip() or None
+
+
+def build_memory_snapshot(memory_file: Path) -> MemorySnapshot:
+    """Build a tiered snapshot of MEMORY.md for context injection."""
+    if not memory_file.exists():
+        return MemorySnapshot(exists=False, full_content=None, first_section=None,
+                              file_path=str(memory_file))
+    content = memory_file.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    if len(lines) <= MEMORY_INLINE_LINES:
+        return MemorySnapshot(exists=True, full_content=content, first_section=None,
+                              total_lines=len(lines), file_path=str(memory_file))
+    first_section = _extract_section(content, "# now")
+    outline = [l for l in lines if l.startswith("#")][:20]
+    return MemorySnapshot(exists=True, full_content=None, first_section=first_section,
+                          outline=outline, total_lines=len(lines), file_path=str(memory_file))
 
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
@@ -96,8 +146,22 @@ class MemoryStore:
             f.write(entry.rstrip() + "\n\n")
 
     def get_memory_context(self) -> str:
-        long_term = self.read_long_term()
-        return f"## Long-term Memory\n{long_term}" if long_term else ""
+        snapshot = build_memory_snapshot(self.memory_file)
+        if not snapshot.exists:
+            return ""
+        if snapshot.full_content is not None:
+            return f"## Long-term Memory\n{snapshot.full_content}"
+        # 大文件：注入 # now 节 + 结构摘要，避免撑满 context
+        parts = []
+        if snapshot.first_section:
+            parts.append(f"## Memory (# now)\n{snapshot.first_section}")
+        if snapshot.outline:
+            parts.append(
+                f"## Memory Structure ({snapshot.total_lines} lines total — "
+                f"read {snapshot.file_path} for full content)\n" +
+                "\n".join(snapshot.outline)
+            )
+        return "\n\n".join(parts)
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
@@ -355,3 +419,48 @@ class MemoryConsolidator:
                 estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
                     return
+
+
+# ---------------------------------------------------------------------------
+# Run Logger (JSONL)
+# ---------------------------------------------------------------------------
+
+
+class RunLogger:
+    """Append turn messages to a per-session JSONL file for run replay.
+
+    Files are stored at: {workspace}/runs/{safe_session_key}-{YYYY-MM-DD}.jsonl
+    Each line is a JSON object with _ts, _session, messages[], and optional usage{}.
+    Write failures are silently ignored to avoid disrupting the main flow.
+    """
+
+    def __init__(self, workspace: Path):
+        self._runs_dir = ensure_dir(workspace / "runs")
+
+    def get_path(self, session_key: str, date_str: str) -> Path:
+        safe_key = session_key.replace(":", "_").replace("/", "_")
+        return self._runs_dir / f"{safe_key}-{date_str}.jsonl"
+
+    def write_turn(
+        self,
+        session_key: str,
+        messages: list[dict],
+        usage: dict | None = None,
+    ) -> None:
+        """Append one turn (all new messages) as a single JSONL record."""
+        if not messages:
+            return
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        path = self.get_path(session_key, date_str)
+        record: dict[str, Any] = {
+            "_ts": datetime.now().isoformat(),
+            "_session": session_key,
+            "messages": messages,
+        }
+        if usage:
+            record["usage"] = usage
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass

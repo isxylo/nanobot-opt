@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.memory import MemoryConsolidator
+from nanobot.agent.memory import MemoryConsolidator, RunLogger
 from nanobot.agent.router import FailoverReason, ModelRouter, build_router_from_config, classify_error
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
@@ -105,7 +105,9 @@ class AgentLoop:
         self._session_pending: dict[str, int] = {}  # per-session pending count
         self._session_queued: dict[str, list[InboundMessage]] = {}  # per-session queued msgs for drain merge
         self._max_pending_per_session = 3  # 超过此数量的排队消息直接丢弃
+        self._global_semaphore = asyncio.Semaphore(10)  # 全局最大并发 session 数
         self.router = router
+        self._run_logger = RunLogger(workspace)
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -380,45 +382,46 @@ class AgentLoop:
 
         self._session_pending[key] = 1
         try:
-            async with self._get_session_lock(key):
-                # 合并等待队列中的消息
-                queued = self._session_queued.pop(key, [])
-                if queued:
-                    combined = msg.content + "\n\n" + "\n\n".join(
-                        f"[后续消息 {i+1}]: {q.content}" for i, q in enumerate(queued)
-                    )
-                    logger.info(
-                        "Session {} drain-merging {} queued messages into one",
-                        key, len(queued),
-                    )
-                    merged_msg = InboundMessage(
-                        channel=msg.channel,
-                        sender_id=msg.sender_id,
-                        chat_id=msg.chat_id,
-                        content=combined,
-                        metadata=msg.metadata or {},
-                    )
-                    process_msg = merged_msg
-                else:
-                    process_msg = msg
-                try:
-                    response = await self._process_message(process_msg)
-                    if response is not None:
-                        await self.bus.publish_outbound(response)
-                    elif msg.channel == "cli":
+            async with self._global_semaphore:
+                async with self._get_session_lock(key):
+                    # 合并等待队列中的消息
+                    queued = self._session_queued.pop(key, [])
+                    if queued:
+                        combined = msg.content + "\n\n" + "\n\n".join(
+                            f"[后续消息 {i+1}]: {q.content}" for i, q in enumerate(queued)
+                        )
+                        logger.info(
+                            "Session {} drain-merging {} queued messages into one",
+                            key, len(queued),
+                        )
+                        merged_msg = InboundMessage(
+                            channel=msg.channel,
+                            sender_id=msg.sender_id,
+                            chat_id=msg.chat_id,
+                            content=combined,
+                            metadata=msg.metadata or {},
+                        )
+                        process_msg = merged_msg
+                    else:
+                        process_msg = msg
+                    try:
+                        response = await self._process_message(process_msg)
+                        if response is not None:
+                            await self.bus.publish_outbound(response)
+                        elif msg.channel == "cli":
+                            await self.bus.publish_outbound(OutboundMessage(
+                                channel=msg.channel, chat_id=msg.chat_id,
+                                content="", metadata=msg.metadata or {},
+                            ))
+                    except asyncio.CancelledError:
+                        logger.info("Task cancelled for session {}", key)
+                        raise
+                    except Exception:
+                        logger.exception("Error processing message for session {}", key)
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
-                            content="", metadata=msg.metadata or {},
+                            content="Sorry, I encountered an error.",
                         ))
-                except asyncio.CancelledError:
-                    logger.info("Task cancelled for session {}", key)
-                    raise
-                except Exception:
-                    logger.exception("Error processing message for session {}", key)
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel, chat_id=msg.chat_id,
-                        content="Sorry, I encountered an error.",
-                    ))
         finally:
             self._session_pending.pop(key, None)
             self._session_queued.pop(key, None)
@@ -695,6 +698,7 @@ class AgentLoop:
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()
+        self._run_logger.write_turn(session.key, messages[skip:], usage)
 
     async def process_direct(
         self,
