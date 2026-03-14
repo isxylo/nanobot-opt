@@ -152,9 +152,11 @@ class MemoryStore:
         if snapshot.full_content is not None:
             return f"## Long-term Memory\n{snapshot.full_content}"
         # 大文件：注入 # now 节 + 结构摘要，避免撑满 context
+        # 若无 # now 节（legacy 格式），fallback 到全文注入，避免记忆丢失
+        if not snapshot.first_section:
+            return f"## Long-term Memory\n{snapshot.full_content or self.memory_file.read_text(encoding='utf-8')}"
         parts = []
-        if snapshot.first_section:
-            parts.append(f"## Memory (# now)\n{snapshot.first_section}")
+        parts.append(f"## Memory (# now)\n{snapshot.first_section}")
         if snapshot.outline:
             parts.append(
                 f"## Memory Structure ({snapshot.total_lines} lines total — "

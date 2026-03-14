@@ -667,6 +667,7 @@ class AgentLoop:
                 session.metadata[k] = session.metadata.get(k, 0) + v
             self._update_global_stats(usage)
         from datetime import datetime
+        session_start = len(session.messages)
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
@@ -698,7 +699,9 @@ class AgentLoop:
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()
-        self._run_logger.write_turn(session.key, messages[skip:], usage)
+        # Log the sanitized session entries (not raw messages) to avoid writing
+        # unbounded tool outputs or base64 images to the JSONL run log.
+        self._run_logger.write_turn(session.key, session.messages[session_start:], usage)
 
     async def process_direct(
         self,
