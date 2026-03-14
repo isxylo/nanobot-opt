@@ -318,13 +318,30 @@ class WebFetchTool(Tool):
         from readability import Document
 
         try:
+            # Disable automatic redirects; handle manually to validate each hop for SSRF
             async with httpx.AsyncClient(
-                follow_redirects=True,
-                max_redirects=MAX_REDIRECTS,
+                follow_redirects=False,
                 timeout=30.0,
                 proxy=self.proxy,
             ) as client:
-                r = await client.get(url, headers={"User-Agent": USER_AGENT})
+                current_url = url
+                for _ in range(MAX_REDIRECTS):
+                    r = await client.get(current_url, headers={"User-Agent": USER_AGENT})
+                    if r.is_redirect:
+                        next_url = str(r.headers.get("location", ""))
+                        if not next_url:
+                            break
+                        # Validate redirect target for SSRF
+                        redir_valid, redir_err = _validate_url(next_url)
+                        if not redir_valid:
+                            return json.dumps({"error": f"Redirect blocked: {redir_err}", "url": url}, ensure_ascii=False)
+                        redir_hostname = urlparse(next_url).hostname or ""
+                        redir_safe, ssrf_err = await _check_ssrf(redir_hostname)
+                        if not redir_safe:
+                            return json.dumps({"error": f"Redirect SSRF blocked: {ssrf_err}", "url": url}, ensure_ascii=False)
+                        current_url = next_url
+                        continue
+                    break
                 r.raise_for_status()
 
             ctype = r.headers.get("content-type", "")
