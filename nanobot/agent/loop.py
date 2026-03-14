@@ -472,12 +472,34 @@ class AgentLoop:
             prompt = session.metadata.get("prompt_tokens", 0)
             completion = session.metadata.get("completion_tokens", 0)
             total = prompt + completion
+
+            def _fmt(n: int) -> str:
+                if n >= 1_000_000:
+                    return f"{n / 1_000_000:.1f}M"
+                if n >= 1_000:
+                    return f"{n / 1_000:.1f}k"
+                return str(n)
+
             lines = [
                 "📊 本次会话 Token 用量：",
-                f"  输入：{prompt:,}",
-                f"  输出：{completion:,}",
-                f"  合计：{total:,}",
+                f"  输入：{_fmt(prompt)}",
+                f"  输出：{_fmt(completion)}",
+                f"  合计：{_fmt(total)}",
             ]
+
+            # 路由 tier 统计（仅路由启用时显示）
+            if self.router:
+                fast = session.metadata.get("route_fast", 0)
+                normal = session.metadata.get("route_normal", 0)
+                heavy = session.metadata.get("route_heavy", 0)
+                total_routed = fast + normal + heavy
+                if total_routed > 0:
+                    lines.append("")
+                    lines.append("🔀 模型路由分布：")
+                    lines.append(f"  Fast  ：{fast} 次 ({fast * 100 // total_routed}%)")
+                    lines.append(f"  Normal：{normal} 次 ({normal * 100 // total_routed}%)")
+                    lines.append(f"  Heavy ：{heavy} 次 ({heavy * 100 // total_routed}%)")
+
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
             )
@@ -515,6 +537,9 @@ class AgentLoop:
             )
 
         current_tier = route.tier if self.router else None
+        if self.router and current_tier:
+            meta_key = f"route_{current_tier}"
+            session.metadata[meta_key] = session.metadata.get(meta_key, 0) + 1
         final_content, _, all_msgs, usage, finish_reason = await self._run_agent_loop(
             initial_messages,
             model_override=model_to_use,
