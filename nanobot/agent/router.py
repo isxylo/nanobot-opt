@@ -96,8 +96,6 @@ class ModelRouter:
     保守策略：宁可 normal 不误降级到 fast。
     """
 
-    FAST_MAX_CHARS = 30
-
     HEAVY_MIN_CHARS = 300
     HEAVY_KEYWORDS = {
         "重构", "架构", "设计方案", "深度分析", "系统设计", "全面",
@@ -112,6 +110,30 @@ class ModelRouter:
         r"step \d|\d\. ",
         r"\bapi\b|\bsdk\b|\bsql\b",
     ]
+
+    # 明确是简单确认/情感的词，必须整词匹配（避免「好」匹配「中午好」）
+    FAST_EXPLICIT = {
+        "好的", "嗯", "嗯嗯", "哦", "哦哦", "哈哈", "哈", "呵呵",
+        "谢谢", "谢谢你", "感谢", "多谢", "thanks", "thank you", "thx",
+        "ok", "okay", "收到", "明白", "明白了", "知道了",
+        "再见", "拜拜", "bye", "hi", "hello", "你好", "早安", "晚安",
+        "是的", "没错", "exactly", "yes", "yep", "no", "nope",
+    }
+    # 含这些词说明需要思考，即使消息很短也不走 FAST
+    FAST_BLOCKERS = {
+        # 疑问词
+        "什么", "怎么", "怎样", "如何", "为什么", "为啥",
+        "有没有", "能不能", "可不可以", "是不是", "有什么",
+        "哪", "哪些", "哪个", "几", "多少", "多久", "多大",
+        "吗", "呢", "？", "?",
+        "what", "how", "why", "which", "when", "where", "who",
+        # 指令动词
+        "帮我", "帮你", "给我", "告诉我", "说说", "讲讲", "介绍",
+        "分析", "解释", "解释下", "写", "做", "生成", "创建", "实现",
+        "查", "搜", "找", "看看", "评价", "比较", "推荐", "建议",
+        "explain", "describe", "write", "make", "create", "find",
+        "search", "show", "list", "compare", "recommend",
+    }
 
     def __init__(self, tier_models: dict[str, str]):
         self.tier_models = tier_models
@@ -162,9 +184,13 @@ class ModelRouter:
         if self._heavy_re.search(msg):
             return ComplexityTier.HEAVY, "pattern_match"
 
-        # FAST：短消息且不触发 HEAVY
-        if len(msg) <= self.FAST_MAX_CHARS:
-            return ComplexityTier.FAST, f"len={len(msg)}<={self.FAST_MAX_CHARS}"
+        # FAST：必须明确是简单确认/情感词，且不含任何思考性词汇
+        if any(kw in msg_lower for kw in self.FAST_BLOCKERS):
+            return ComplexityTier.NORMAL, "fast_blocked"
+
+        if any(kw in msg_lower for kw in self.FAST_EXPLICIT):
+            matched = next(kw for kw in self.FAST_EXPLICIT if kw in msg_lower)
+            return ComplexityTier.FAST, f"explicit={matched!r}"
 
         return ComplexityTier.NORMAL, "default"
 
