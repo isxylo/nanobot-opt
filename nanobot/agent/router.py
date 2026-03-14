@@ -4,8 +4,75 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum
 
 from loguru import logger
+
+
+class FailoverReason(str, Enum):
+    """Reason a model call failed, used to decide fallback behavior."""
+    RATE_LIMIT = "rate_limit"        # 429 / 速率限制，可降级重试
+    OVERLOADED = "overloaded"        # 503 / 服务过载，可降级重试
+    AUTH = "auth"                    # 401/403 认证失败，不应重试
+    CONTEXT_OVERFLOW = "context_overflow"  # context 超长，不走降级链
+    LENGTH = "length"                # finish_reason=length，升级到更大模型
+    ERROR = "error"                  # 其他错误，尝试回退默认模型
+    UNKNOWN = "unknown"
+
+
+_RATE_LIMIT_PATTERNS = [
+    r"rate.?limit", r"429", r"too many requests", r"request limit",
+    r"quota", r"throttl",
+]
+_OVERLOADED_PATTERNS = [
+    r"overload", r"503", r"service unavailable", r"capacity",
+    r"server.?busy", r"try again later",
+]
+_AUTH_PATTERNS = [
+    r"401", r"403", r"unauthorized", r"forbidden",
+    r"invalid.?api.?key", r"authentication", r"access.?denied",
+]
+_CONTEXT_PATTERNS = [
+    r"context.?(?:length|window|limit|overflow)",
+    r"maximum.?(?:context|token)",
+    r"prompt.?too.?long",
+    r"reduce.?(?:the.?length|your.?input)",
+    r"tokens?.+exceed",
+]
+
+_RATE_RE = re.compile("|".join(_RATE_LIMIT_PATTERNS), re.IGNORECASE)
+_OVERLOAD_RE = re.compile("|".join(_OVERLOADED_PATTERNS), re.IGNORECASE)
+_AUTH_RE = re.compile("|".join(_AUTH_PATTERNS), re.IGNORECASE)
+_CONTEXT_RE = re.compile("|".join(_CONTEXT_PATTERNS), re.IGNORECASE)
+
+
+def classify_error(error: Exception | str) -> FailoverReason:
+    """
+    从异常或错误消息中推断失败原因。
+
+    用于 loop.py 决定是否降级、升级或直接失败。
+    """
+    msg = str(error).lower()
+    # 检查 HTTP 状态码（优先）
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if status:
+        s = int(status)
+        if s == 429:
+            return FailoverReason.RATE_LIMIT
+        if s in (401, 403):
+            return FailoverReason.AUTH
+        if s == 503:
+            return FailoverReason.OVERLOADED
+    # 文本匹配
+    if _CONTEXT_RE.search(msg):
+        return FailoverReason.CONTEXT_OVERFLOW
+    if _AUTH_RE.search(msg):
+        return FailoverReason.AUTH
+    if _RATE_RE.search(msg):
+        return FailoverReason.RATE_LIMIT
+    if _OVERLOAD_RE.search(msg):
+        return FailoverReason.OVERLOADED
+    return FailoverReason.UNKNOWN
 
 
 class ComplexityTier:
@@ -63,6 +130,16 @@ class ModelRouter:
             return None
         model = self.tier_models.get(next_tier, self.tier_models.get(ComplexityTier.NORMAL, ""))
         return RouteResult(tier=next_tier, model=model, reason=f"upgraded_from={tier}")
+
+    def should_fallback(self, reason: FailoverReason) -> bool:
+        """
+        根据错误原因判断是否应该走降级/重试逻辑。
+
+        - CONTEXT_OVERFLOW：不降级，上下文超长换模型也没用
+        - AUTH：不降级，认证失败换模型也无效
+        - 其他：允许降级回默认模型
+        """
+        return reason not in (FailoverReason.CONTEXT_OVERFLOW, FailoverReason.AUTH)
 
     def route(self, message: str, history_len: int) -> RouteResult:
         tier, reason = self._classify(message, history_len)

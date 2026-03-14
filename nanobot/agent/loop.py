@@ -15,7 +15,7 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryConsolidator
-from nanobot.agent.router import ModelRouter, build_router_from_config
+from nanobot.agent.router import FailoverReason, ModelRouter, build_router_from_config, classify_error
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -102,6 +102,8 @@ class AgentLoop:
         self._mcp_connecting = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-session locks
+        self._session_pending: dict[str, int] = {}  # per-session pending count
+        self._max_pending_per_session = 3  # 超过此数量的排队消息直接丢弃
         self.router = router
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
@@ -250,16 +252,27 @@ class AgentLoop:
                 # Don't persist error responses to session history — they can
                 # poison the context and cause permanent 400 loops (#1303).
                 if response.finish_reason == "error":
-                    # If routed to non-default model, retry once with default model
+                    err_reason = classify_error(clean or "")
+                    # Context overflow: don't retry, just report
+                    if err_reason == FailoverReason.CONTEXT_OVERFLOW:
+                        logger.error("Context overflow, not retrying: {}", (clean or "")[:200])
+                        final_content = "对话历史过长，请使用 /new 开启新会话。"
+                        break
+                    # Auth error: don't retry, credentials won't change
+                    if err_reason == FailoverReason.AUTH:
+                        logger.error("Auth error, not retrying: {}", (clean or "")[:200])
+                        final_content = clean or "认证失败，请检查 API Key 配置。"
+                        break
+                    # Rate limit / overload: fall back to default model if routed
                     if model_override and model_override != self.model:
                         logger.warning(
-                            "Routed model {} failed, falling back to default model {}",
-                            model_override, self.model,
+                            "Routed model {} failed (reason={}), falling back to default model {}",
+                            model_override, err_reason.value, self.model,
                         )
                         model = self.model
                         model_override = None
                         continue
-                    logger.error("LLM returned error: {}", (clean or "")[:200])
+                    logger.error("LLM returned error (reason={}): {}", err_reason.value, (clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
                 messages = self.context.add_assistant_message(
@@ -331,26 +344,46 @@ class AgentLoop:
         asyncio.create_task(_do_restart())
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message under the per-session lock."""
-        async with self._get_session_lock(msg.session_key):
-            try:
-                response = await self._process_message(msg)
-                if response is not None:
-                    await self.bus.publish_outbound(response)
-                elif msg.channel == "cli":
+        """Process a message under the per-session lock, with pending queue cap."""
+        key = msg.session_key
+        pending = self._session_pending.get(key, 0)
+        if pending >= self._max_pending_per_session:
+            logger.warning(
+                "Session {} queue full ({} pending), dropping message: {!r}",
+                key, pending, msg.content[:60],
+            )
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="消息队列已满，请等待当前任务完成后再发送。",
+            ))
+            return
+        self._session_pending[key] = pending + 1
+        try:
+            async with self._get_session_lock(key):
+                try:
+                    response = await self._process_message(msg)
+                    if response is not None:
+                        await self.bus.publish_outbound(response)
+                    elif msg.channel == "cli":
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content="", metadata=msg.metadata or {},
+                        ))
+                except asyncio.CancelledError:
+                    logger.info("Task cancelled for session {}", key)
+                    raise
+                except Exception:
+                    logger.exception("Error processing message for session {}", key)
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id,
-                        content="", metadata=msg.metadata or {},
+                        content="Sorry, I encountered an error.",
                     ))
-            except asyncio.CancelledError:
-                logger.info("Task cancelled for session {}", msg.session_key)
-                raise
-            except Exception:
-                logger.exception("Error processing message for session {}", msg.session_key)
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id,
-                    content="Sorry, I encountered an error.",
-                ))
+        finally:
+            remaining = self._session_pending.get(key, 1) - 1
+            if remaining <= 0:
+                self._session_pending.pop(key, None)
+            else:
+                self._session_pending[key] = remaining
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
