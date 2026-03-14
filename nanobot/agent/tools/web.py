@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
 import json
 import os
 import re
+import socket
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -37,36 +39,53 @@ def _normalize(text: str) -> str:
     return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 
-_SSRF_BLOCKED_PATTERNS = re.compile(
-    r'^('
-    r'localhost|'
-    r'127\.\d+\.\d+\.\d+|'
-    r'0\.0\.0\.0|'
-    r'10\.\d+\.\d+\.\d+|'
-    r'172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|'
-    r'192\.168\.\d+\.\d+|'
-    r'169\.254\.\d+\.\d+|'  # link-local / cloud metadata
-    r'::1|'
-    r'fc[0-9a-f]{2}:|fd[0-9a-f]{2}:'  # IPv6 ULA
-    r')'
-    , re.I
-)
+def _is_private_ip(ip_str: str) -> bool:
+    """Return True if the IP address is private, loopback, link-local, or reserved."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_unspecified
+            or addr.is_multicast
+        )
+    except ValueError:
+        return False
 
 
 def _validate_url(url: str) -> tuple[bool, str]:
-    """Validate URL: must be http(s) with valid domain and no SSRF targets."""
+    """Validate URL: must be http(s) with valid domain."""
     try:
         p = urlparse(url)
         if p.scheme not in ('http', 'https'):
             return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
         if not p.netloc:
             return False, "Missing domain"
-        hostname = p.hostname or ""
-        if _SSRF_BLOCKED_PATTERNS.match(hostname):
-            return False, f"Blocked: requests to internal/private addresses are not allowed ({hostname})"
         return True, ""
     except Exception as e:
         return False, str(e)
+
+
+async def _check_ssrf(hostname: str) -> tuple[bool, str]:
+    """Resolve hostname and block private/internal IPs to prevent SSRF.
+
+    Resolves DNS to catch rebinding attacks and IP obfuscation.
+    Returns (is_safe, error_message).
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        infos = await loop.run_in_executor(
+            None, lambda: socket.getaddrinfo(hostname, None)
+        )
+        for info in infos:
+            ip_str = info[4][0]
+            if _is_private_ip(ip_str):
+                return False, f"Blocked: {hostname} resolves to private/internal address ({ip_str})"
+        return True, ""
+    except socket.gaierror as e:
+        return False, f"DNS resolution failed for {hostname}: {e}"
 
 
 def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
@@ -248,6 +267,12 @@ class WebFetchTool(Tool):
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
+
+        # SSRF protection: resolve DNS and block private/internal IPs
+        hostname = urlparse(url).hostname or ""
+        is_safe, ssrf_err = await _check_ssrf(hostname)
+        if not is_safe:
+            return json.dumps({"error": ssrf_err, "url": url}, ensure_ascii=False)
 
         result = await self._fetch_jina(url, max_chars)
         if result is None:
