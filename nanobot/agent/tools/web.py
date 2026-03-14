@@ -37,14 +37,33 @@ def _normalize(text: str) -> str:
     return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 
+_SSRF_BLOCKED_PATTERNS = re.compile(
+    r'^('
+    r'localhost|'
+    r'127\.\d+\.\d+\.\d+|'
+    r'0\.0\.0\.0|'
+    r'10\.\d+\.\d+\.\d+|'
+    r'172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|'
+    r'192\.168\.\d+\.\d+|'
+    r'169\.254\.\d+\.\d+|'  # link-local / cloud metadata
+    r'::1|'
+    r'fc[0-9a-f]{2}:|fd[0-9a-f]{2}:'  # IPv6 ULA
+    r')'
+    , re.I
+)
+
+
 def _validate_url(url: str) -> tuple[bool, str]:
-    """Validate URL: must be http(s) with valid domain."""
+    """Validate URL: must be http(s) with valid domain and no SSRF targets."""
     try:
         p = urlparse(url)
         if p.scheme not in ('http', 'https'):
             return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
         if not p.netloc:
             return False, "Missing domain"
+        hostname = p.hostname or ""
+        if _SSRF_BLOCKED_PATTERNS.match(hostname):
+            return False, f"Blocked: requests to internal/private addresses are not allowed ({hostname})"
         return True, ""
     except Exception as e:
         return False, str(e)

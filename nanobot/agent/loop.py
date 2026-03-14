@@ -384,7 +384,7 @@ class AgentLoop:
         try:
             async with self._global_semaphore:
                 async with self._get_session_lock(key):
-                    # 合并等待队列中的消息
+                    # 合并等待队列中的消息（只取此刻已排队的，处理期间新到的留给下一轮）
                     queued = self._session_queued.pop(key, [])
                     if queued:
                         combined = msg.content + "\n\n" + "\n\n".join(
@@ -424,7 +424,20 @@ class AgentLoop:
                         ))
         finally:
             self._session_pending.pop(key, None)
-            self._session_queued.pop(key, None)
+            # 注意：不清除 _session_queued[key]，处理期间新到达的消息留给下一轮 _dispatch 处理
+            # 如果还有排队消息，重新触发一次 dispatch
+            leftover = self._session_queued.pop(key, [])
+            if leftover:
+                logger.debug(
+                    "Session {} has {} messages queued after processing, re-dispatching",
+                    key, len(leftover),
+                )
+                next_msg = leftover[0]
+                # 剩余消息（除第一条外）重新放回队列，pending 清零让 next_msg 作为 primary
+                if len(leftover) > 1:
+                    self._session_queued[key] = leftover[1:]
+                # pending 已在上面 pop 为 0，_dispatch(next_msg) 会重新设为 1
+                asyncio.create_task(self._dispatch(next_msg))
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
