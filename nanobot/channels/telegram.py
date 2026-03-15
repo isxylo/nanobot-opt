@@ -148,6 +148,27 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
+class _StreamingMessage:
+    """Holds a sent Telegram message that is being progressively edited."""
+
+    def __init__(self, app, chat_id: int, message_id: int) -> None:
+        self._app = app
+        self._chat_id = chat_id
+        self.message_id = message_id
+
+    async def edit(self, text: str) -> None:
+        try:
+            html = _markdown_to_telegram_html(text)
+            await self._app.bot.edit_message_text(
+                chat_id=self._chat_id,
+                message_id=self.message_id,
+                text=html,
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass  # Ignore: same content, rate limit, or message too old
+
+
 class TelegramChannel(BaseChannel):
     """
     Telegram channel using long polling.
@@ -179,6 +200,7 @@ class TelegramChannel(BaseChannel):
         self._message_threads: dict[tuple[str, int], int] = {}
         self._bot_user_id: int | None = None
         self._bot_username: str | None = None
+        self._stream_contexts: dict[str, _StreamingMessage] = {}  # chat_id -> in-progress stream msg
 
     def is_allowed(self, sender_id: str) -> bool:
         """Preserve Telegram's legacy id|username allowlist matching."""
@@ -302,8 +324,9 @@ class TelegramChannel(BaseChannel):
             logger.warning("Telegram bot not running")
             return
 
-        # Only stop typing indicator for final responses
-        if not msg.metadata.get("_progress", False):
+        # Stop typing indicator for final responses (not for progress or streaming deltas)
+        is_stream = msg.metadata.get("_stream_delta") or msg.metadata.get("_stream_done")
+        if not msg.metadata.get("_progress", False) and not is_stream:
             self._stop_typing(msg.chat_id)
 
         try:
@@ -353,6 +376,36 @@ class TelegramChannel(BaseChannel):
                     reply_parameters=reply_params,
                     **thread_kwargs,
                 )
+
+        # Handle streaming delta: create placeholder msg on first delta, then edit in-place
+        if msg.metadata.get("_stream_delta") and msg.content:
+            ctx = self._stream_contexts.get(msg.chat_id)
+            if ctx is None:
+                self._stop_typing(msg.chat_id)
+                try:
+                    sent = await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text="▋",
+                        reply_parameters=reply_params,
+                        **thread_kwargs,
+                    )
+                    ctx = _StreamingMessage(self._app, chat_id, sent.message_id)
+                    self._stream_contexts[msg.chat_id] = ctx
+                except Exception as e:
+                    logger.warning("Failed to send stream placeholder: {}", e)
+            if ctx:
+                await ctx.edit(msg.content)
+            return
+
+        # Handle streaming done: final edit, then clear context
+        if msg.metadata.get("_stream_done") and msg.content:
+            ctx = self._stream_contexts.pop(msg.chat_id, None)
+            if ctx:
+                await ctx.edit(msg.content)
+            else:
+                # Fallback: no placeholder exists, send normally
+                await self._send_text(chat_id, msg.content, reply_params, thread_kwargs)
+            return
 
         # Send text content
         if msg.content and msg.content != "[empty message]":

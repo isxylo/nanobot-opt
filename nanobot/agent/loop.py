@@ -9,7 +9,7 @@ import re
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, AsyncIterator
 
 from loguru import logger
 
@@ -32,6 +32,33 @@ from nanobot.session.manager import Session, SessionManager
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
     from nanobot.cron.service import CronService
+
+
+class _StreamBuffer:
+    """Accumulates streaming deltas and throttles on_delta calls (300 ms interval)."""
+
+    FLUSH_INTERVAL = 0.3  # seconds
+
+    def __init__(self, on_delta: Callable[[str], Awaitable[None]]) -> None:
+        self._buf = ""
+        self._on_delta = on_delta
+        self._last_flush = 0.0
+
+    async def push(self, delta: str) -> None:
+        self._buf += delta
+        now = asyncio.get_event_loop().time()
+        if now - self._last_flush >= self.FLUSH_INTERVAL:
+            await self._flush()
+
+    async def flush_final(self) -> str:
+        """Flush remaining buffer and return accumulated content."""
+        if self._buf:
+            await self._flush()
+        return self._buf
+
+    async def _flush(self) -> None:
+        self._last_flush = asyncio.get_event_loop().time()
+        await self._on_delta(self._buf)
 
 
 class AgentLoop:
@@ -195,6 +222,8 @@ class AgentLoop:
         initial_messages: list[dict],
         model_override: str | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_stream: Callable[[str], Awaitable[None]] | None = None,
+        on_stream_done: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict], dict]:
         """Run the agent iteration loop."""
         messages = initial_messages
@@ -294,6 +323,17 @@ class AgentLoop:
                     thinking_blocks=response.thinking_blocks,
                 )
                 final_content = clean
+                # Stream final content progressively if callback provided
+                if on_stream and clean:
+                    buf = _StreamBuffer(on_stream)
+                    chunk_size = max(len(clean) // 12, 20)
+                    pos = 0
+                    while pos < len(clean):
+                        await buf.push(clean[pos:pos + chunk_size])
+                        pos += chunk_size
+                    await buf.flush_final()
+                    if on_stream_done:
+                        await on_stream_done(clean)
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -629,6 +669,20 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
+        async def _bus_stream_delta(content: str) -> None:
+            meta = dict(msg.metadata or {})
+            meta["_stream_delta"] = True
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
+            ))
+
+        async def _bus_stream_done(content: str) -> None:
+            meta = dict(msg.metadata or {})
+            meta["_stream_done"] = True
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
+            ))
+
         # Model routing: select tier based on message complexity
         model_to_use = self.model
         if self.router:
@@ -643,10 +697,20 @@ class AgentLoop:
         if self.router and current_tier:
             meta_key = f"route_{current_tier}"
             session.metadata[meta_key] = session.metadata.get(meta_key, 0) + 1
+        # Only use streaming for Telegram (edit-message UX); skip for CLI/system channels
+        use_stream = msg.channel == "telegram"
+        _stream_done_sent = False
+
+        async def _tracked_stream_done(content: str) -> None:
+            nonlocal _stream_done_sent
+            _stream_done_sent = True
+            await _bus_stream_done(content)
         final_content, _, all_msgs, usage, finish_reason = await self._run_agent_loop(
             initial_messages,
             model_override=model_to_use,
             on_progress=on_progress or _bus_progress,
+            on_stream=_bus_stream_delta if use_stream else None,
+            on_stream_done=_tracked_stream_done if use_stream else None,
         )
 
         # Upgrade to next tier if response was truncated
@@ -661,6 +725,8 @@ class AgentLoop:
                     initial_messages,
                     model_override=upgraded.model,
                     on_progress=on_progress or _bus_progress,
+                    on_stream=_bus_stream_delta if use_stream else None,
+                    on_stream_done=_bus_stream_done if use_stream else None,
                 )
 
         if final_content is None:
@@ -676,6 +742,10 @@ class AgentLoop:
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+            return None
+
+        # Streaming already sent the final content via _stream_done — don't double-send
+        if _stream_done_sent:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content

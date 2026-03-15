@@ -4,7 +4,7 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncIterator
 
 from loguru import logger
 
@@ -263,6 +263,24 @@ class LLMProvider(ABC):
                 content=f"Error calling LLM: {exc}",
                 finish_reason="error",
             )
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream text deltas. Default falls back to non-streaming (yields full content once)."""
+        resp = await self.chat(
+            messages, tools=tools, model=model,
+            max_tokens=max_tokens, temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
+        if resp.content:
+            yield resp.content
 
     @abstractmethod
     def get_default_model(self) -> str:

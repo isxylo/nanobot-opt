@@ -57,6 +57,44 @@ class CustomProvider(LLMProvider):
             reasoning_content=getattr(msg, "reasoning_content", None) or None,
         )
 
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ):
+        # With tools, fall back to non-streaming (tool call parsing requires complete response)
+        if tools:
+            resp = await self.chat(
+                messages, tools=tools, model=model,
+                max_tokens=max_tokens, temperature=temperature,
+                reasoning_effort=reasoning_effort,
+            )
+            if resp.content:
+                yield resp.content
+            return
+        kwargs: dict[str, Any] = {
+            "model": model or self.default_model,
+            "messages": self._sanitize_empty_content(messages),
+            "max_tokens": max(1, max_tokens),
+            "temperature": temperature,
+            "stream": True,
+        }
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        try:
+            stream = await self._client.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                if chunk.choices:
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        yield delta
+        except Exception as e:
+            yield f"Error: {e}"
+
     def get_default_model(self) -> str:
         return self.default_model
 
