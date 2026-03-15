@@ -157,12 +157,17 @@ Move completed items from `# now` to `# History`. Keep `# now` actionable and co
         if not media:
             return text
 
+        _MAX_IMAGE_BYTES = 4 * 1024 * 1024  # 4MB per image
         images = []
         for path in media:
             p = Path(path)
             if not p.is_file():
                 continue
             raw = p.read_bytes()
+            if len(raw) > _MAX_IMAGE_BYTES:
+                from loguru import logger
+                logger.warning("Image {} ({} bytes) exceeds 4MB limit, skipping", path, len(raw))
+                continue
             # Detect real MIME type from magic bytes; fallback to filename guess
             mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
             if not mime or not mime.startswith("image/"):
