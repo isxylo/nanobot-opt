@@ -23,26 +23,30 @@ class ContextBuilder:
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        # Cache fields: (cached_value, mtime_or_None)
+        self._identity_cache: str | None = None
+        self._bootstrap_cache: tuple[str, float] | None = None  # (content, max_mtime)
+        self._skills_summary_cache: tuple[str, float] | None = None  # (content, max_mtime)
+        self._always_skills_cache: tuple[str, float] | None = None  # (content, max_mtime)
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
 
-        bootstrap = self._load_bootstrap_files()
+        bootstrap = self._load_bootstrap_files_cached()
         if bootstrap:
             parts.append(bootstrap)
 
+        # Memory is always fresh (changes frequently)
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
-        always_skills = self.skills.get_always_skills()
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+        always_content = self._load_always_skills_cached()
+        if always_content:
+            parts.append(f"# Active Skills\n\n{always_content}")
 
-        skills_summary = self.skills.build_skills_summary()
+        skills_summary = self._load_skills_summary_cached()
         if skills_summary:
             parts.append(f"""# Skills
 
@@ -53,8 +57,61 @@ Skills with available="false" need dependencies installed first - you can try in
 
         return "\n\n---\n\n".join(parts)
 
+    def _get_bootstrap_mtime(self) -> float:
+        """Return max mtime of all bootstrap files (0.0 if none exist)."""
+        mtimes = []
+        for filename in self.BOOTSTRAP_FILES:
+            p = self.workspace / filename
+            if p.exists():
+                mtimes.append(p.stat().st_mtime)
+        return max(mtimes) if mtimes else 0.0
+
+    def _get_skills_mtime(self) -> float:
+        """Return max mtime of skills directory."""
+        skills_dir = self.workspace / "skills"
+        if not skills_dir.exists():
+            return 0.0
+        mtimes = [p.stat().st_mtime for p in skills_dir.rglob("*") if p.is_file()]
+        return max(mtimes) if mtimes else 0.0
+
+    def _load_bootstrap_files_cached(self) -> str:
+        """Load bootstrap files with mtime-based cache."""
+        mtime = self._get_bootstrap_mtime()
+        if self._bootstrap_cache is not None and self._bootstrap_cache[1] == mtime:
+            return self._bootstrap_cache[0]
+        content = self._load_bootstrap_files()
+        self._bootstrap_cache = (content, mtime)
+        return content
+
+    def _load_always_skills_cached(self) -> str:
+        """Load always-on skills with mtime-based cache."""
+        mtime = self._get_skills_mtime()
+        if self._always_skills_cache is not None and self._always_skills_cache[1] == mtime:
+            return self._always_skills_cache[0]
+        always_skills = self.skills.get_always_skills()
+        content = self.skills.load_skills_for_context(always_skills) if always_skills else ""
+        self._always_skills_cache = (content, mtime)
+        return content
+
+    def _load_skills_summary_cached(self) -> str:
+        """Load skills summary with mtime-based cache."""
+        mtime = self._get_skills_mtime()
+        if self._skills_summary_cache is not None and self._skills_summary_cache[1] == mtime:
+            return self._skills_summary_cache[0]
+        content = self.skills.build_skills_summary()
+        self._skills_summary_cache = (content, mtime)
+        return content
+
     def _get_identity(self) -> str:
-        """Get the core identity section."""
+        """Get the core identity section (cached — static content)."""
+        if self._identity_cache is not None:
+            return self._identity_cache
+        result = self._build_identity()
+        self._identity_cache = result
+        return result
+
+    def _build_identity(self) -> str:
+        """Build the core identity section."""
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
