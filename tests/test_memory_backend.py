@@ -101,7 +101,7 @@ def test_extract_nocturne_content_empty_body():
     sep = "=" * 60
     read_result = f"{sep}\nMEMORY: core://x\n{sep}\n\n"
     result = _extract_nocturne_content(read_result)
-    assert result is None  # empty content → None
+    assert result is None  # empty content → None — write_memory returns False, no append
 
 
 def test_extract_nocturne_content_unrecognised_format():
@@ -141,6 +141,20 @@ async def test_write_memory_updates_existing_node_with_patch():
 
 
 @pytest.mark.asyncio
+async def test_write_memory_returns_false_when_content_unextractable():
+    """When node exists but content cannot be parsed, return False (no append bloat)."""
+    tools = MagicMock()
+    # read_memory returns something that looks like success but has no parseable content
+    tools.execute = AsyncMock(return_value="some unparseable response without separators")
+    adapter = NocturneMCPAdapter(tools)
+    ok = await adapter.write_memory("core://", "new content", title="nanobot_memory")
+    assert ok is False
+    # Must NOT have called update_memory (no append)
+    calls = [c[0][0] for c in tools.execute.call_args_list]
+    assert "update_memory" not in calls
+
+
+@pytest.mark.asyncio
 async def test_write_memory_creates_when_node_missing():
     """When read_memory returns error, write_memory calls create_memory."""
     tools = MagicMock()
@@ -165,13 +179,17 @@ async def test_write_memory_nocturne_rejects_mutual_exclusive_params():
     """
     tools = MagicMock()
 
+    sep = "=" * 60
+    existing = "existing content body"
+    read_response = f"{sep}\nMEMORY: core://x\nMemory ID: 1\n{sep}\n\n{existing}\n\n{sep}\n"
+
     async def _strict_update(name, args):
         if name == "update_memory":
             if args.get("old_string") is not None and args.get("append") is not None:
                 return "Error: Cannot use both old_string/new_string (patch) and append at the same time."
             return "Success: updated"
         if name == "read_memory":
-            return "MEMORY: core://x\ncontent"
+            return read_response
         return "Success"
 
     tools.execute = AsyncMock(side_effect=_strict_update)

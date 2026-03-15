@@ -400,13 +400,17 @@ class MemoryConsolidator:
         """
         if self._nocturne is not None and not self._dual_write:
             # nocturne_mcp mode: summarize via LLM but skip ALL local file writes.
-            # Use MCP boot cache as current_memory so the summary builds on MCP state,
-            # not the (potentially stale/empty) local MEMORY.md.
-            mcp_current = (
-                self._hybrid_memory._boot_cache
-                if self._hybrid_memory is not None and self._hybrid_memory._boot_cache
-                else None
-            )
+            # Read the actual written node (core://nanobot_memory) as the current memory
+            # baseline, not boot_cache (which reflects system://boot, not our node).
+            mcp_current: str | None = None
+            try:
+                node_result = await self._nocturne._tools.execute(
+                    "read_memory", {"uri": "core://nanobot_memory"}
+                )
+                if node_result and not node_result.startswith("Error:"):
+                    mcp_current = _extract_nocturne_content(node_result)
+            except Exception:
+                pass  # fall back to None — summarize_only will use local file as last resort
             summary = await self.store.summarize_only(
                 messages, self.provider, self.model, current_memory=mcp_current
             )
@@ -625,17 +629,19 @@ class NocturneMCPAdapter:
                 # nocturne format: content appears after the second '===...===' separator line.
                 current_content = _extract_nocturne_content(read_result)
                 if current_content is None:
-                    # Cannot extract content — fall through to append as best-effort
-                    update_result = await self._tools.execute("update_memory", {
-                        "uri": uri,
-                        "append": f"\n\n---\n[updated {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}]\n{content}",
-                    })
-                else:
-                    update_result = await self._tools.execute("update_memory", {
-                        "uri": uri,
-                        "old_string": current_content,
-                        "new_string": content,
-                    })
+                    # Cannot extract content body — cannot do idempotent patch.
+                    # Do NOT fall back to append (would cause content bloat).
+                    # Return False so the caller can handle the failure.
+                    logger.warning(
+                        "NocturneMCPAdapter: cannot extract content from read_result for {}, "
+                        "skipping update to avoid content bloat", uri
+                    )
+                    return False
+                update_result = await self._tools.execute("update_memory", {
+                    "uri": uri,
+                    "old_string": current_content,
+                    "new_string": content,
+                })
                 ok = update_result and not update_result.startswith("Error:")
                 if not ok:
                     logger.warning("NocturneMCPAdapter: update failed: {}", update_result)
