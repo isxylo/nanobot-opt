@@ -79,10 +79,18 @@ class ExecTool(Tool):
         self, command: str, working_dir: str | None = None,
         timeout: int | None = None, **kwargs: Any,
     ) -> str:
-        # When restrict_to_workspace is enabled, ignore caller-supplied working_dir
-        # to prevent LLM from escaping the workspace by setting an arbitrary cwd.
+        # When restrict_to_workspace is enabled, only allow working_dir that is
+        # within the workspace — prevents LLM from escaping via arbitrary cwd.
         if self.restrict_to_workspace:
-            cwd = self.working_dir or os.getcwd()
+            workspace_root = Path(self.working_dir or os.getcwd()).resolve()
+            if working_dir:
+                requested = Path(working_dir).resolve()
+                if requested == workspace_root or workspace_root in requested.parents:
+                    cwd = str(requested)
+                else:
+                    cwd = str(workspace_root)  # silently fall back, _guard will catch path violations
+            else:
+                cwd = str(workspace_root)
         else:
             cwd = working_dir or self.working_dir or os.getcwd()
         guard_error = self._guard_command(command, cwd)
