@@ -573,6 +573,23 @@ class AgentLoop:
                         saved_pct = fast * 100 // total_routed
                         lines.append(f"  💰 路由节省估算：约 {saved_pct}% 的请求用了低价模型")
 
+            # 延迟 & 错误率
+            turns = session.metadata.get("turns", 0)
+            if turns > 0:
+                avg_ms = session.metadata.get("avg_latency_ms", 0)
+                error_turns = session.metadata.get("error_turns", 0)
+                lines.append("")
+                lines.append("⏱ 本次会话性能：")
+                lines.append(f"  对话轮数：{turns}")
+                lines.append(f"  平均响应：{avg_ms / 1000:.1f}s")
+                if error_turns > 0:
+                    lines.append(f"  错误轮数：{error_turns} ({error_turns * 100 // turns}%)")
+
+            # 队列深度
+            q_depth = self.bus.outbound_size
+            if q_depth > 0:
+                lines.append(f"  出站队列：{q_depth} 条待发")
+
             # 历史累计统计
             global_stats = self._load_global_stats()
             g_total = global_stats.get("total_tokens", 0)
@@ -594,6 +611,8 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        import time as _time
+        _turn_start = _time.monotonic()
         history = session.get_history(max_messages=0)
         initial_messages = self.context.build_messages(
             history=history,
@@ -647,6 +666,11 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
+        elapsed_ms = int((_time.monotonic() - _turn_start) * 1000)
+        had_error = final_content is not None and (
+            final_content.startswith("Sorry") or "错误" in final_content[:30]
+        )
+        self._record_turn_metrics(session, elapsed_ms, had_error)
         self._save_turn(session, all_msgs, 1 + len(history), usage)
         self.sessions.save(session)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
@@ -660,6 +684,16 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=msg.metadata or {},
         )
+
+    def _record_turn_metrics(self, session: Session, elapsed_ms: int, had_error: bool) -> None:
+        """Accumulate per-session latency and error metrics."""
+        session.metadata["turns"] = session.metadata.get("turns", 0) + 1
+        if had_error:
+            session.metadata["error_turns"] = session.metadata.get("error_turns", 0) + 1
+        # Running average latency (ms)
+        prev_avg = session.metadata.get("avg_latency_ms", 0)
+        turns = session.metadata["turns"]
+        session.metadata["avg_latency_ms"] = int((prev_avg * (turns - 1) + elapsed_ms) / turns)
 
     def _load_global_stats(self) -> dict:
         """Load global cumulative usage stats from workspace."""
