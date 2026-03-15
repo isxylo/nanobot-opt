@@ -4,8 +4,11 @@ from nanobot.session.manager import Session
 
 
 def _mk_loop() -> AgentLoop:
+    from unittest.mock import MagicMock
     loop = AgentLoop.__new__(AgentLoop)
     loop._TOOL_RESULT_MAX_CHARS = AgentLoop._TOOL_RESULT_MAX_CHARS
+    loop._run_logger = MagicMock()
+    loop._run_logger.write_turn = MagicMock()
     return loop
 
 
