@@ -281,17 +281,23 @@ class MemoryStore:
         messages: list[dict],
         provider: LLMProvider,
         model: str,
+        current_memory: str | None = None,
     ) -> str | None:
         """Run the consolidation LLM call and return the memory_update text only.
 
         Does NOT write to any local file. Used by nocturne_mcp mode to get
         the summarized content before writing exclusively to MCP.
+
+        Args:
+            current_memory: Current memory context to use as base. If None, reads
+                            from local MEMORY.md (fallback for file/hybrid modes).
         Returns None on failure.
         """
         if not messages:
             return None
 
-        current_memory = await self.read_long_term_async()
+        if current_memory is None:
+            current_memory = await self.read_long_term_async()
         prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
 
 ## Current Long-term Memory
@@ -378,6 +384,7 @@ class MemoryConsolidator:
         self._get_tool_definitions = get_tool_definitions
         self._nocturne = nocturne_adapter
         self._dual_write = dual_write
+        self._hybrid_memory: "HybridMemoryContext | None" = None  # set by _init_hybrid_memory
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
@@ -393,7 +400,16 @@ class MemoryConsolidator:
         """
         if self._nocturne is not None and not self._dual_write:
             # nocturne_mcp mode: summarize via LLM but skip ALL local file writes.
-            summary = await self.store.summarize_only(messages, self.provider, self.model)
+            # Use MCP boot cache as current_memory so the summary builds on MCP state,
+            # not the (potentially stale/empty) local MEMORY.md.
+            mcp_current = (
+                self._hybrid_memory._boot_cache
+                if self._hybrid_memory is not None and self._hybrid_memory._boot_cache
+                else None
+            )
+            summary = await self.store.summarize_only(
+                messages, self.provider, self.model, current_memory=mcp_current
+            )
             if summary:
                 mcp_ok = await self._nocturne.write_memory(
                     parent_uri="core://",
@@ -534,6 +550,30 @@ class MemoryConsolidator:
 # ---------------------------------------------------------------------------
 
 
+def _extract_nocturne_content(read_result: str) -> str | None:
+    """Extract the memory content body from a nocturne read_memory response.
+
+    nocturne format (from mcp_server.py _fetch_and_format_memory):
+        ============================================================
+        MEMORY: core://...
+        ...
+        ============================================================
+
+        <content here>
+
+        ============================================================   <- optional children section
+    Returns the content string, or None if the format is unrecognised.
+    """
+    sep = "=" * 60
+    parts = read_result.split(sep)
+    # Expected: ['', header_block, '', content_block, ...]
+    # Content is the part after the second separator, stripped.
+    if len(parts) < 3:
+        return None
+    content = parts[2].strip()
+    return content if content else None
+
+
 class NocturneMCPAdapter:
     """Thin async adapter for reading/writing memories via nocturne_memory MCP tools.
 
@@ -580,12 +620,22 @@ class NocturneMCPAdapter:
 
         if node_exists:
             try:
-                # Patch mode: replace entire content by matching the existing body.
-                # We fetch the current content from the read result and replace it wholesale.
-                update_result = await self._tools.execute("update_memory", {
-                    "uri": uri,
-                    "append": f"\n\n---\n{content}",
-                })
+                # Patch mode: replace entire content wholesale.
+                # Extract current content from read_result to use as old_string.
+                # nocturne format: content appears after the second '===...===' separator line.
+                current_content = _extract_nocturne_content(read_result)
+                if current_content is None:
+                    # Cannot extract content — fall through to append as best-effort
+                    update_result = await self._tools.execute("update_memory", {
+                        "uri": uri,
+                        "append": f"\n\n---\n[updated {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}]\n{content}",
+                    })
+                else:
+                    update_result = await self._tools.execute("update_memory", {
+                        "uri": uri,
+                        "old_string": current_content,
+                        "new_string": content,
+                    })
                 ok = update_result and not update_result.startswith("Error:")
                 if not ok:
                     logger.warning("NocturneMCPAdapter: update failed: {}", update_result)

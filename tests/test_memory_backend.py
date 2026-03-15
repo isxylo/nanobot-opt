@@ -12,6 +12,7 @@ from nanobot.agent.memory import (
     HybridMemoryContext,
     MemoryStore,
     NocturneMCPAdapter,
+    _extract_nocturne_content,
 )
 from nanobot.config.schema import MemoryConfig
 
@@ -77,13 +78,54 @@ async def test_nocturne_adapter_read_boot_exception():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# _extract_nocturne_content helper
+# ---------------------------------------------------------------------------
+
+
+def test_extract_nocturne_content_normal():
+    sep = "=" * 60
+    read_result = (
+        f"{sep}\n"
+        f"MEMORY: core://nanobot_memory\nMemory ID: 42\n"
+        f"{sep}\n"
+        f"\nThis is the actual content.\n"
+        f"\n{sep}\n"
+        f"CHILD MEMORIES"
+    )
+    result = _extract_nocturne_content(read_result)
+    assert result == "This is the actual content."
+
+
+def test_extract_nocturne_content_empty_body():
+    sep = "=" * 60
+    read_result = f"{sep}\nMEMORY: core://x\n{sep}\n\n"
+    result = _extract_nocturne_content(read_result)
+    assert result is None  # empty content → None
+
+
+def test_extract_nocturne_content_unrecognised_format():
+    result = _extract_nocturne_content("Error: not found")
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# NocturneMCPAdapter — write_memory upsert
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_write_memory_updates_existing_node():
-    """When read_memory succeeds, write_memory calls update_memory (append mode only)."""
+async def test_write_memory_updates_existing_node_with_patch():
+    """When node exists, write_memory uses patch (old_string+new_string), not append."""
+    sep = "=" * 60
+    existing_content = "old memory content"
+    read_result = (
+        f"{sep}\nMEMORY: core://nanobot_memory\n{sep}\n\n{existing_content}\n\n{sep}\n"
+    )
     tools = MagicMock()
     tools.execute = AsyncMock(side_effect=[
-        "MEMORY: core://nanobot_memory\n...",  # read_memory: node exists
-        "Success: Memory updated",              # update_memory
+        read_result,             # read_memory: node exists with content
+        "Success: updated",      # update_memory patch
     ])
     adapter = NocturneMCPAdapter(tools)
     ok = await adapter.write_memory("core://", "new content", title="nanobot_memory")
@@ -91,10 +133,11 @@ async def test_write_memory_updates_existing_node():
     calls = tools.execute.call_args_list
     assert calls[0][0][0] == "read_memory"
     assert calls[1][0][0] == "update_memory"
-    # update_memory must NOT pass old_string+append together (nocturne protocol)
     update_args = calls[1][0][1]
-    assert "old_string" not in update_args or update_args.get("old_string") is None
-    assert "append" in update_args
+    # Must use patch mode (old_string + new_string), NOT append alone
+    assert update_args.get("old_string") == existing_content
+    assert update_args.get("new_string") == "new content"
+    assert "append" not in update_args
 
 
 @pytest.mark.asyncio

@@ -381,6 +381,7 @@ class AgentLoop:
         dual_write = cfg.backend == "hybrid" and adapter is not None
         self.memory_consolidator._nocturne = adapter
         self.memory_consolidator._dual_write = dual_write
+        self.memory_consolidator._hybrid_memory = hybrid
         logger.info(
             "Memory backend: {} (adapter={}, dual_write={})",
             cfg.backend, adapter is not None, dual_write,
