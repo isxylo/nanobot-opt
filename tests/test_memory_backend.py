@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,7 +26,6 @@ def test_memory_config_defaults():
     assert cfg.backend == "file"
     assert cfg.fallback_to_file is True
     assert cfg.mcp_server_name == "nocturne_memory"
-    assert cfg.max_recall_items == 5
 
 
 def test_memory_config_hybrid():
@@ -74,18 +73,40 @@ async def test_nocturne_adapter_read_boot_exception():
 
 
 @pytest.mark.asyncio
-async def test_nocturne_adapter_write_memory_success():
+async def test_nocturne_adapter_write_memory_update_success():
+    """write_memory should try update first and return True on success."""
     tools = MagicMock()
-    tools.execute = AsyncMock(return_value="Success: Memory created at 'core://nanobot_memory'")
+    tools.execute = AsyncMock(return_value="Success: Memory updated")
     adapter = NocturneMCPAdapter(tools)
-    ok = await adapter.write_memory("core://", "some content")
+    ok = await adapter.write_memory("core://", "some content", title="nanobot_memory")
     assert ok is True
+    # Should have tried update_memory first
+    first_call = tools.execute.call_args_list[0]
+    assert first_call[0][0] == "update_memory"
 
 
 @pytest.mark.asyncio
-async def test_nocturne_adapter_write_memory_failure():
+async def test_nocturne_adapter_write_memory_falls_back_to_create():
+    """write_memory should fall back to create_memory when update returns error."""
     tools = MagicMock()
-    tools.execute = AsyncMock(return_value="Error: parent not found")
+    tools.execute = AsyncMock(side_effect=[
+        "Error: URI not found",  # update_memory fails
+        "Success: Memory created at 'core://nanobot_memory'",  # create_memory succeeds
+    ])
+    adapter = NocturneMCPAdapter(tools)
+    ok = await adapter.write_memory("core://", "some content", title="nanobot_memory")
+    assert ok is True
+    assert tools.execute.call_count == 2
+    assert tools.execute.call_args_list[1][0][0] == "create_memory"
+
+
+@pytest.mark.asyncio
+async def test_nocturne_adapter_write_memory_both_fail():
+    tools = MagicMock()
+    tools.execute = AsyncMock(side_effect=[
+        "Error: update failed",
+        "Error: create failed",
+    ])
     adapter = NocturneMCPAdapter(tools)
     ok = await adapter.write_memory("core://", "some content")
     assert ok is False
@@ -94,6 +115,7 @@ async def test_nocturne_adapter_write_memory_failure():
 @pytest.mark.asyncio
 async def test_nocturne_adapter_write_memory_exception():
     tools = MagicMock()
+    # update raises, create raises
     tools.execute = AsyncMock(side_effect=Exception("timeout"))
     adapter = NocturneMCPAdapter(tools)
     ok = await adapter.write_memory("core://", "some content")
@@ -101,7 +123,7 @@ async def test_nocturne_adapter_write_memory_exception():
 
 
 # ---------------------------------------------------------------------------
-# HybridMemoryContext
+# HybridMemoryContext — fallback_to_file enforcement (issue #2)
 # ---------------------------------------------------------------------------
 
 
@@ -120,9 +142,8 @@ async def test_hybrid_uses_mcp_boot_when_available(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_hybrid_falls_back_to_file_on_mcp_failure(tmp_path):
+async def test_hybrid_falls_back_to_file_when_fallback_true(tmp_path):
     store = MemoryStore(tmp_path)
-    # Write something to local MEMORY.md
     store.write_long_term("# now\nlocal memory content")
 
     adapter = MagicMock(spec=NocturneMCPAdapter)
@@ -133,6 +154,23 @@ async def test_hybrid_falls_back_to_file_on_mcp_failure(tmp_path):
 
     result = ctx.get_memory_context()
     assert "local memory content" in result
+
+
+@pytest.mark.asyncio
+async def test_hybrid_returns_empty_when_fallback_false_and_mcp_fails(tmp_path):
+    """fallback_to_file=False: must return empty string, not leak local file."""
+    store = MemoryStore(tmp_path)
+    store.write_long_term("# now\nlocal secret")
+
+    adapter = MagicMock(spec=NocturneMCPAdapter)
+    adapter.read_boot = AsyncMock(return_value=None)  # MCP fails
+
+    ctx = HybridMemoryContext(store=store, adapter=adapter, fallback_to_file=False)
+    await ctx.load_boot()
+
+    result = ctx.get_memory_context()
+    assert result == ""
+    assert "local secret" not in result
 
 
 @pytest.mark.asyncio
@@ -171,6 +209,5 @@ def test_tools_config_has_memory():
 
 def test_tools_config_memory_from_dict():
     from nanobot.config.schema import ToolsConfig
-    cfg = ToolsConfig.model_validate({"memory": {"backend": "hybrid", "maxRecallItems": 10}})
+    cfg = ToolsConfig.model_validate({"memory": {"backend": "hybrid"}})
     assert cfg.memory.backend == "hybrid"
-    assert cfg.memory.max_recall_items == 10

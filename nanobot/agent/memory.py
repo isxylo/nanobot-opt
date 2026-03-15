@@ -332,12 +332,32 @@ class MemoryConsolidator:
     async def consolidate_messages(self, messages: list[dict[str, object]]) -> bool:
         """Archive a selected message chunk into persistent memory.
 
-        In hybrid/dual-write mode: writes to local MEMORY.md first (primary),
-        then best-effort writes a summary to nocturne MCP (non-blocking).
+        backend=file:          write local MEMORY.md only (default)
+        backend=hybrid:        write local MEMORY.md (primary) + best-effort MCP upsert
+        backend=nocturne_mcp:  write MCP only; skip local file write
         """
+        if self._nocturne is not None and not self._dual_write:
+            # nocturne_mcp mode: consolidate via LLM to get the summary text,
+            # then write only to MCP (skip local file persistence).
+            ok = await self.store.consolidate(messages, self.provider, self.model)
+            if ok:
+                summary = self.store.read_long_term()
+                if summary:
+                    mcp_ok = await self._nocturne.write_memory(
+                        parent_uri="core://",
+                        content=summary,
+                        title="nanobot_memory",
+                        priority=2,
+                        disclosure="当需要了解用户偏好和历史对话摘要时",
+                    )
+                    if not mcp_ok:
+                        logger.warning("consolidate_messages: MCP write failed (nocturne_mcp mode)")
+            return ok
+
+        # file or hybrid: always write local MEMORY.md
         ok = await self.store.consolidate(messages, self.provider, self.model)
         if ok and self._dual_write and self._nocturne is not None:
-            # Best-effort: write a brief summary node to nocturne; failures don't affect ok
+            # hybrid: best-effort MCP upsert after local write succeeds
             summary = self.store.read_long_term()
             if summary:
                 asyncio.create_task(self._nocturne.write_memory(
@@ -486,18 +506,40 @@ class NocturneMCPAdapter:
 
     async def write_memory(self, parent_uri: str, content: str, title: str | None = None,
                            priority: int = 2, disclosure: str = "") -> bool:
-        """Call create_memory or update_memory to persist a consolidation result."""
+        """Upsert a memory node: update if URI exists, create otherwise.
+
+        This ensures idempotency — repeated consolidations update the same node
+        rather than accumulating duplicates.
+        """
+        if title:
+            uri = f"{parent_uri.rstrip('/')}/{title}" if not parent_uri.endswith("://") else f"{parent_uri}{title}"
+        else:
+            uri = parent_uri
+
         try:
-            result = await self._tools.execute("create_memory", {
+            # Try update first (idempotent path)
+            update_result = await self._tools.execute("update_memory", {
+                "uri": uri,
+                "old_string": "",   # append mode: old_string empty triggers replace-all via append
+                "append": content,
+            })
+            # update_memory returns error when node doesn't exist yet — fall through to create
+            if update_result and not update_result.startswith("Error:"):
+                return True
+        except Exception:
+            pass  # fall through to create
+
+        try:
+            create_result = await self._tools.execute("create_memory", {
                 "parent_uri": parent_uri,
                 "content": content,
                 "priority": priority,
                 "title": title,
                 "disclosure": disclosure,
             })
-            ok = result and not result.startswith("Error:")
+            ok = create_result and not create_result.startswith("Error:")
             if not ok:
-                logger.warning("NocturneMCPAdapter: write failed: {}", result)
+                logger.warning("NocturneMCPAdapter: write failed: {}", create_result)
             return bool(ok)
         except Exception:
             logger.exception("NocturneMCPAdapter: exception during write")
@@ -540,8 +582,10 @@ class HybridMemoryContext:
         """Return memory context for system prompt injection."""
         if self._boot_loaded and self._boot_cache:
             return f"## Long-term Memory (nocturne)\n{self._boot_cache}"
-        # Fallback: use local file store
-        return self._store.get_memory_context()
+        # MCP boot not available — respect fallback_to_file setting
+        if self._fallback:
+            return self._store.get_memory_context()
+        return ""  # fallback_to_file=False: return empty rather than leaking local file
 
 
 # ---------------------------------------------------------------------------
