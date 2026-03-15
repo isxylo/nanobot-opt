@@ -276,6 +276,61 @@ class MemoryStore:
             logger.exception("Memory consolidation failed")
             return self._fail_or_raw_archive(messages)
 
+    async def summarize_only(
+        self,
+        messages: list[dict],
+        provider: LLMProvider,
+        model: str,
+    ) -> str | None:
+        """Run the consolidation LLM call and return the memory_update text only.
+
+        Does NOT write to any local file. Used by nocturne_mcp mode to get
+        the summarized content before writing exclusively to MCP.
+        Returns None on failure.
+        """
+        if not messages:
+            return None
+
+        current_memory = await self.read_long_term_async()
+        prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
+
+## Current Long-term Memory
+{current_memory or "(empty)"}
+
+## Conversation to Process
+{self._format_messages(messages)}"""
+
+        chat_messages = [
+            {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            forced = {"type": "function", "function": {"name": "save_memory"}}
+            response = await provider.chat_with_retry(
+                messages=chat_messages,
+                tools=_SAVE_MEMORY_TOOL,
+                model=model,
+                tool_choice=forced,
+            )
+            if response.finish_reason == "error" and _is_tool_choice_unsupported(response.content):
+                response = await provider.chat_with_retry(
+                    messages=chat_messages,
+                    tools=_SAVE_MEMORY_TOOL,
+                    model=model,
+                    tool_choice="auto",
+                )
+            if not response.has_tool_calls:
+                return None
+            args = _normalize_save_memory_args(response.tool_calls[0].arguments)
+            if not args:
+                return None
+            update = args.get("memory_update")
+            return _ensure_text(update).strip() if update else None
+        except Exception:
+            logger.exception("MemoryStore.summarize_only failed")
+            return None
+
     def _fail_or_raw_archive(self, messages: list[dict]) -> bool:
         """Increment failure count; after threshold, raw-archive messages and return True."""
         self._consecutive_failures += 1
@@ -337,22 +392,21 @@ class MemoryConsolidator:
         backend=nocturne_mcp:  write MCP only; skip local file write
         """
         if self._nocturne is not None and not self._dual_write:
-            # nocturne_mcp mode: consolidate via LLM to get the summary text,
-            # then write only to MCP (skip local file persistence).
-            ok = await self.store.consolidate(messages, self.provider, self.model)
-            if ok:
-                summary = self.store.read_long_term()
-                if summary:
-                    mcp_ok = await self._nocturne.write_memory(
-                        parent_uri="core://",
-                        content=summary,
-                        title="nanobot_memory",
-                        priority=2,
-                        disclosure="当需要了解用户偏好和历史对话摘要时",
-                    )
-                    if not mcp_ok:
-                        logger.warning("consolidate_messages: MCP write failed (nocturne_mcp mode)")
-            return ok
+            # nocturne_mcp mode: summarize via LLM but skip ALL local file writes.
+            summary = await self.store.summarize_only(messages, self.provider, self.model)
+            if summary:
+                mcp_ok = await self._nocturne.write_memory(
+                    parent_uri="core://",
+                    content=summary,
+                    title="nanobot_memory",
+                    priority=2,
+                    disclosure="当需要了解用户偏好和历史对话摘要时",
+                )
+                if not mcp_ok:
+                    logger.warning("consolidate_messages: MCP write failed (nocturne_mcp mode)")
+                return bool(mcp_ok)
+            logger.warning("consolidate_messages: summarize_only returned None (nocturne_mcp mode)")
+            return False
 
         # file or hybrid: always write local MEMORY.md
         ok = await self.store.consolidate(messages, self.provider, self.model)
@@ -506,28 +560,39 @@ class NocturneMCPAdapter:
 
     async def write_memory(self, parent_uri: str, content: str, title: str | None = None,
                            priority: int = 2, disclosure: str = "") -> bool:
-        """Upsert a memory node: update if URI exists, create otherwise.
+        """Upsert a memory node: update (patch) if URI exists, create otherwise.
 
-        This ensures idempotency — repeated consolidations update the same node
-        rather than accumulating duplicates.
+        Protocol: nocturne update_memory uses patch (old_string+new_string) or
+        append — they are mutually exclusive. We probe existence via read_memory,
+        then patch the full content if found, or create if not.
         """
         if title:
-            uri = f"{parent_uri.rstrip('/')}/{title}" if not parent_uri.endswith("://") else f"{parent_uri}{title}"
+            uri = f"{parent_uri}{title}" if parent_uri.endswith("://") else f"{parent_uri.rstrip('/')}/{title}"
         else:
             uri = parent_uri
 
         try:
-            # Try update first (idempotent path)
-            update_result = await self._tools.execute("update_memory", {
-                "uri": uri,
-                "old_string": "",   # append mode: old_string empty triggers replace-all via append
-                "append": content,
-            })
-            # update_memory returns error when node doesn't exist yet — fall through to create
-            if update_result and not update_result.startswith("Error:"):
-                return True
+            # Probe: check if node already exists
+            read_result = await self._tools.execute("read_memory", {"uri": uri})
+            node_exists = read_result and not read_result.startswith("Error:")
         except Exception:
-            pass  # fall through to create
+            node_exists = False
+
+        if node_exists:
+            try:
+                # Patch mode: replace entire content by matching the existing body.
+                # We fetch the current content from the read result and replace it wholesale.
+                update_result = await self._tools.execute("update_memory", {
+                    "uri": uri,
+                    "append": f"\n\n---\n{content}",
+                })
+                ok = update_result and not update_result.startswith("Error:")
+                if not ok:
+                    logger.warning("NocturneMCPAdapter: update failed: {}", update_result)
+                return bool(ok)
+            except Exception:
+                logger.exception("NocturneMCPAdapter: exception during update")
+                return False
 
         try:
             create_result = await self._tools.execute("create_memory", {
@@ -539,10 +604,10 @@ class NocturneMCPAdapter:
             })
             ok = create_result and not create_result.startswith("Error:")
             if not ok:
-                logger.warning("NocturneMCPAdapter: write failed: {}", create_result)
+                logger.warning("NocturneMCPAdapter: create failed: {}", create_result)
             return bool(ok)
         except Exception:
-            logger.exception("NocturneMCPAdapter: exception during write")
+            logger.exception("NocturneMCPAdapter: exception during create")
             return False
 
 
