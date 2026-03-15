@@ -138,12 +138,24 @@ class MemoryStore:
             return self.memory_file.read_text(encoding="utf-8")
         return ""
 
+    async def read_long_term_async(self) -> str:
+        """Async version of read_long_term — avoids blocking the event loop."""
+        return await asyncio.to_thread(self.read_long_term)
+
     def write_long_term(self, content: str) -> None:
         self.memory_file.write_text(content, encoding="utf-8")
+
+    async def write_long_term_async(self, content: str) -> None:
+        """Async version of write_long_term — avoids blocking the event loop."""
+        await asyncio.to_thread(self.write_long_term, content)
 
     def append_history(self, entry: str) -> None:
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
+
+    async def append_history_async(self, entry: str) -> None:
+        """Async version of append_history — avoids blocking the event loop."""
+        await asyncio.to_thread(self.append_history, entry)
 
     def get_memory_context(self) -> str:
         snapshot = build_memory_snapshot(self.memory_file)
@@ -187,7 +199,7 @@ class MemoryStore:
         if not messages:
             return True
 
-        current_memory = self.read_long_term()
+        current_memory = await self.read_long_term_async()
         prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
 
 ## Current Long-term Memory
@@ -252,10 +264,10 @@ class MemoryStore:
                 logger.warning("Memory consolidation: history_entry is empty after normalization")
                 return self._fail_or_raw_archive(messages)
 
-            self.append_history(entry)
+            await self.append_history_async(entry)
             update = _ensure_text(update)
             if update != current_memory:
-                self.write_long_term(update)
+                await self.write_long_term_async(update)
 
             self._consecutive_failures = 0
             logger.info("Memory consolidation done for {} messages", len(messages))
@@ -449,7 +461,11 @@ class RunLogger:
         messages: list[dict],
         usage: dict | None = None,
     ) -> None:
-        """Append one turn (all new messages) as a single JSONL record."""
+        """Append one turn (all new messages) as a single JSONL record.
+
+        The file write is offloaded to a thread-pool executor to avoid
+        blocking the asyncio event loop.
+        """
         if not messages:
             return
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -461,8 +477,18 @@ class RunLogger:
         }
         if usage:
             record["usage"] = usage
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+
+        def _write() -> None:
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line)
+            except Exception:
+                pass
+
         try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, _write)
+        except RuntimeError:
+            # No running loop (e.g. tests) — write synchronously
+            _write()
