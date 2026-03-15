@@ -12,6 +12,11 @@ class Tool(ABC):
     the environment, such as reading files, executing commands, etc.
     """
 
+    #: Set to False for tools that mutate shared state (files, processes).
+    #: When any tool in a batch has parallel_safe=False, all tools in that
+    #: batch are executed serially to avoid race conditions.
+    parallel_safe: bool = True
+
     _TYPE_MAP = {
         "string": str,
         "integer": int,

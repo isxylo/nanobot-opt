@@ -240,14 +240,23 @@ class AgentLoop:
                     thinking_blocks=response.thinking_blocks,
                 )
 
-                # Execute tool calls in parallel
+                # Execute tool calls: parallel if all are parallel_safe, else serial
                 async def _exec_one(tc):
                     tools_used.append(tc.name)
                     logger.info("Tool call: {}({})", tc.name, json.dumps(tc.arguments, ensure_ascii=False)[:200])
                     result = await self.tools.execute(tc.name, tc.arguments)
                     return tc, result
 
-                pairs = await asyncio.gather(*[_exec_one(tc) for tc in response.tool_calls])
+                all_parallel_safe = all(
+                    getattr(self.tools.get(tc.name), "parallel_safe", True)
+                    for tc in response.tool_calls
+                )
+                if all_parallel_safe:
+                    pairs = await asyncio.gather(*[_exec_one(tc) for tc in response.tool_calls])
+                else:
+                    pairs = []
+                    for tc in response.tool_calls:
+                        pairs.append(await _exec_one(tc))
                 for tc, result in pairs:
                     messages = self.context.add_tool_result(
                         messages, tc.id, tc.name, result

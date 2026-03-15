@@ -126,6 +126,8 @@ class ReadFileTool(_FsTool):
 class WriteFileTool(_FsTool):
     """Write content to a file."""
 
+    parallel_safe = False  # mutates filesystem
+
     @property
     def name(self) -> str:
         return "write_file"
@@ -189,6 +191,8 @@ def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
 
 class EditFileTool(_FsTool):
     """Edit a file by replacing text with fallback matching."""
+
+    parallel_safe = False  # mutates filesystem
 
     @property
     def name(self) -> str:

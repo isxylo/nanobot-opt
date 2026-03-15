@@ -12,6 +12,8 @@ from nanobot.agent.tools.base import Tool
 class ExecTool(Tool):
     """Tool to execute shell commands."""
 
+    parallel_safe = False  # executes arbitrary commands, may mutate state
+
     def __init__(
         self,
         timeout: int = 60,
