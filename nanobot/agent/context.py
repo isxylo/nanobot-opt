@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.memory import MemoryStore
+from nanobot.agent.memory import HybridMemoryContext, MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.utils.helpers import build_assistant_message, detect_image_mime
 
@@ -19,9 +19,10 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, hybrid_memory: HybridMemoryContext | None = None):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
+        self._hybrid_memory = hybrid_memory
         self.skills = SkillsLoader(workspace)
         # Cache fields: (cached_value, mtime_or_None)
         self._identity_cache: str | None = None
@@ -37,8 +38,9 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        # Memory is always fresh (changes frequently)
-        memory = self.memory.get_memory_context()
+        # Memory: use hybrid (MCP+file) if available, else plain file store
+        memory_ctx = self._hybrid_memory if self._hybrid_memory is not None else self.memory
+        memory = memory_ctx.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 

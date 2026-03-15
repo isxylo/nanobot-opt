@@ -311,6 +311,8 @@ class MemoryConsolidator:
         context_window_tokens: int,
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        nocturne_adapter: "NocturneMCPAdapter | None" = None,
+        dual_write: bool = False,
     ):
         self.store = MemoryStore(workspace)
         self.provider = provider
@@ -319,6 +321,8 @@ class MemoryConsolidator:
         self.context_window_tokens = context_window_tokens
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
+        self._nocturne = nocturne_adapter
+        self._dual_write = dual_write
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
@@ -326,8 +330,24 @@ class MemoryConsolidator:
         return self._locks.setdefault(session_key, asyncio.Lock())
 
     async def consolidate_messages(self, messages: list[dict[str, object]]) -> bool:
-        """Archive a selected message chunk into persistent memory."""
-        return await self.store.consolidate(messages, self.provider, self.model)
+        """Archive a selected message chunk into persistent memory.
+
+        In hybrid/dual-write mode: writes to local MEMORY.md first (primary),
+        then best-effort writes a summary to nocturne MCP (non-blocking).
+        """
+        ok = await self.store.consolidate(messages, self.provider, self.model)
+        if ok and self._dual_write and self._nocturne is not None:
+            # Best-effort: write a brief summary node to nocturne; failures don't affect ok
+            summary = self.store.read_long_term()
+            if summary:
+                asyncio.create_task(self._nocturne.write_memory(
+                    parent_uri="core://",
+                    content=summary,
+                    title="nanobot_memory",
+                    priority=2,
+                    disclosure="当需要了解用户偏好和历史对话摘要时",
+                ))
+        return ok
 
     def pick_consolidation_boundary(
         self,
@@ -433,6 +453,95 @@ class MemoryConsolidator:
                 estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
                     return
+
+
+# ---------------------------------------------------------------------------
+# Nocturne MCP Memory Adapter
+# ---------------------------------------------------------------------------
+
+
+class NocturneMCPAdapter:
+    """Thin async adapter for reading/writing memories via nocturne_memory MCP tools.
+
+    Wraps the already-connected MCP tool registry so callers don't need to know
+    MCP internals.  All methods are best-effort: exceptions are caught and logged
+    so they never block the main agent flow.
+    """
+
+    def __init__(self, tools) -> None:
+        """Accept a ToolRegistry (or any object with .execute(name, args))."""
+        self._tools = tools
+
+    async def read_boot(self) -> str | None:
+        """Call read_memory('system://boot') and return the content string."""
+        try:
+            result = await self._tools.execute("read_memory", {"uri": "system://boot"})
+            if result and not result.startswith("Error:"):
+                return result
+            logger.warning("NocturneMCPAdapter: boot read failed: {}", result)
+            return None
+        except Exception:
+            logger.exception("NocturneMCPAdapter: exception during boot read")
+            return None
+
+    async def write_memory(self, parent_uri: str, content: str, title: str | None = None,
+                           priority: int = 2, disclosure: str = "") -> bool:
+        """Call create_memory or update_memory to persist a consolidation result."""
+        try:
+            result = await self._tools.execute("create_memory", {
+                "parent_uri": parent_uri,
+                "content": content,
+                "priority": priority,
+                "title": title,
+                "disclosure": disclosure,
+            })
+            ok = result and not result.startswith("Error:")
+            if not ok:
+                logger.warning("NocturneMCPAdapter: write failed: {}", result)
+            return bool(ok)
+        except Exception:
+            logger.exception("NocturneMCPAdapter: exception during write")
+            return False
+
+
+class HybridMemoryContext:
+    """Reads memory context from MCP (boot URI) with fallback to local MEMORY.md.
+
+    Used by ContextBuilder.build_system_prompt() to inject long-term memory.
+    This class is intentionally synchronous-safe: it caches the last successful
+    async boot result so the synchronous get_memory_context() path can use it.
+    """
+
+    def __init__(
+        self,
+        store: "MemoryStore",
+        adapter: NocturneMCPAdapter | None,
+        fallback_to_file: bool = True,
+    ) -> None:
+        self._store = store
+        self._adapter = adapter
+        self._fallback = fallback_to_file
+        self._boot_cache: str | None = None  # last successful MCP boot result
+        self._boot_loaded: bool = False
+
+    async def load_boot(self) -> None:
+        """Fetch boot memories from MCP and cache them.  Call once at startup."""
+        if self._adapter is None:
+            return
+        result = await self._adapter.read_boot()
+        if result:
+            self._boot_cache = result
+            self._boot_loaded = True
+            logger.info("HybridMemoryContext: boot memories loaded from MCP")
+        elif self._fallback:
+            logger.warning("HybridMemoryContext: MCP boot failed, will fall back to MEMORY.md")
+
+    def get_memory_context(self) -> str:
+        """Return memory context for system prompt injection."""
+        if self._boot_loaded and self._boot_cache:
+            return f"## Long-term Memory (nocturne)\n{self._boot_cache}"
+        # Fallback: use local file store
+        return self._store.get_memory_context()
 
 
 # ---------------------------------------------------------------------------

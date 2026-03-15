@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, AsyncIterator
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.memory import MemoryConsolidator, RunLogger
+from nanobot.agent.memory import HybridMemoryContext, MemoryConsolidator, MemoryStore, NocturneMCPAdapter, RunLogger
 from nanobot.agent.router import FailoverReason, ModelRouter, build_router_from_config, classify_error
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
@@ -92,8 +92,9 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         router: ModelRouter | None = None,
+        memory_config=None,
     ):
-        from nanobot.config.schema import ExecToolConfig, WebSearchConfig
+        from nanobot.config.schema import ExecToolConfig, MemoryConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -135,6 +136,8 @@ class AgentLoop:
         self._global_semaphore = asyncio.Semaphore(10)  # 全局最大并发 session 数
         self.router = router
         self._run_logger = RunLogger(workspace)
+        self._memory_config = memory_config  # MemoryConfig | None
+        self._hybrid_memory: HybridMemoryContext | None = None  # set after MCP connect
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -345,10 +348,49 @@ class AgentLoop:
 
         return final_content, tools_used, messages, total_usage, last_finish_reason
 
+    async def _init_hybrid_memory(self) -> None:
+        """Initialize HybridMemoryContext after MCP is connected."""
+        from nanobot.config.schema import MemoryConfig
+        cfg: MemoryConfig = self._memory_config or MemoryConfig()
+        if cfg.backend == "file":
+            return  # plain file mode — no hybrid needed
+
+        # Build adapter only if nocturne MCP server is registered and connected
+        adapter: NocturneMCPAdapter | None = None
+        nocturne_tool = self.tools.get("read_memory")
+        if nocturne_tool is not None:
+            adapter = NocturneMCPAdapter(self.tools)
+        elif cfg.backend in ("nocturne_mcp", "hybrid"):
+            logger.warning(
+                "memory.backend={} but 'read_memory' tool not found — "
+                "check that nocturne_memory MCP server '{}' is configured and connected",
+                cfg.backend, cfg.mcp_server_name,
+            )
+
+        store = MemoryStore(self.workspace)
+        hybrid = HybridMemoryContext(
+            store=store,
+            adapter=adapter,
+            fallback_to_file=cfg.fallback_to_file,
+        )
+        await hybrid.load_boot()
+        self._hybrid_memory = hybrid
+
+        # Patch context builder and consolidator with hybrid memory
+        self.context._hybrid_memory = hybrid
+        dual_write = cfg.backend == "hybrid" and adapter is not None
+        self.memory_consolidator._nocturne = adapter
+        self.memory_consolidator._dual_write = dual_write
+        logger.info(
+            "Memory backend: {} (adapter={}, dual_write={})",
+            cfg.backend, adapter is not None, dual_write,
+        )
+
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
         await self._connect_mcp()
+        await self._init_hybrid_memory()
         logger.info("Agent loop started")
 
         while self._running:
@@ -844,6 +886,8 @@ class AgentLoop:
     ) -> str:
         """Process a message directly (for CLI or cron usage)."""
         await self._connect_mcp()
+        if self._hybrid_memory is None:
+            await self._init_hybrid_memory()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
         return response.content if response else ""

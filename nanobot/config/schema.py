@@ -353,6 +353,20 @@ class MCPServerConfig(Base):
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # ["*"] = all tools; [] = none; list specific names to filter
 
 
+class MemoryConfig(Base):
+    """Memory backend configuration."""
+
+    backend: Literal["file", "nocturne_mcp", "hybrid"] = "file"
+    # URIs to load at boot (used when backend is nocturne_mcp or hybrid)
+    boot_uris: list[str] = Field(default_factory=lambda: ["core://agent", "core://user"])
+    # MCP server name in tools.mcp_servers that points to nocturne_memory
+    mcp_server_name: str = "nocturne_memory"
+    # Max number of recalled items to inject into context
+    max_recall_items: int = 5
+    # Fallback to local MEMORY.md when MCP boot fails (hybrid/nocturne_mcp mode)
+    fallback_to_file: bool = True
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
@@ -360,6 +374,7 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
 
 class Config(BaseSettings):
