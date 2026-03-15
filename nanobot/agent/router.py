@@ -138,6 +138,32 @@ class ModelRouter:
     def __init__(self, tier_models: dict[str, str]):
         self.tier_models = tier_models
         self._heavy_re = re.compile("|".join(self.HEAVY_PATTERNS), re.IGNORECASE)
+        # Pre-compile word-boundary regexes for keyword sets to avoid substring false-positives.
+        # Chinese words use (?<![\u4e00-\u9fff]) boundaries; English words use \b.
+        self._heavy_kw_re = self._build_kw_re(self.HEAVY_KEYWORDS, strict_end=False)
+        self._fast_blocker_re = self._build_kw_re(self.FAST_BLOCKERS, strict_end=False)
+        self._fast_explicit_re = self._build_kw_re(self.FAST_EXPLICIT, strict_end=True)
+
+    @staticmethod
+    def _build_kw_re(keywords: set[str], strict_end: bool = True) -> re.Pattern:
+        """Build a regex that matches any keyword with word/CJK boundaries.
+
+        strict_end=True (default): also guard end boundary (for FAST_EXPLICIT/FAST_BLOCKERS).
+        strict_end=False: only guard start boundary (for HEAVY_KEYWORDS — a heavy trigger
+          like '帮我写' should fire even when followed by more CJK characters).
+        """
+        parts = []
+        for kw in keywords:
+            if re.search(r'[\u4e00-\u9fff]', kw):
+                if len(kw) == 1:
+                    end = r'(?![\u4e00-\u9fff])' if strict_end else ''
+                    parts.append(rf'(?<![\u4e00-\u9fff]){re.escape(kw)}{end}')
+                else:
+                    end = r'(?![\u4e00-\u9fff])' if strict_end else ''
+                    parts.append(rf'{re.escape(kw)}{end}')
+            else:
+                parts.append(rf'\b{re.escape(kw)}\b')
+        return re.compile('|'.join(parts), re.IGNORECASE)
 
     # Tier upgrade chain
     _UPGRADE = {
@@ -180,19 +206,20 @@ class ModelRouter:
         if len(msg) >= self.HEAVY_MIN_CHARS:
             return ComplexityTier.HEAVY, f"len={len(msg)}>={self.HEAVY_MIN_CHARS}"
 
-        if any(kw in msg_lower for kw in self.HEAVY_KEYWORDS):
-            matched = next(kw for kw in self.HEAVY_KEYWORDS if kw in msg_lower)
-            return ComplexityTier.HEAVY, f"keyword={matched!r}"
+        m = self._heavy_kw_re.search(msg_lower)
+        if m:
+            return ComplexityTier.HEAVY, f"keyword={m.group()!r}"
 
         if self._heavy_re.search(msg):
             return ComplexityTier.HEAVY, "pattern_match"
 
         # FAST：必须明确是简单确认/情感词，且不含任何思考性词汇
-        if any(kw in msg_lower for kw in self.FAST_BLOCKERS):
+        if self._fast_blocker_re.search(msg_lower):
             return ComplexityTier.NORMAL, "fast_blocked"
 
-        if any(kw in msg_lower for kw in self.FAST_EXPLICIT):
-            matched = next(kw for kw in self.FAST_EXPLICIT if kw in msg_lower)
+        m = self._fast_explicit_re.search(msg_lower)
+        if m:
+            matched = m.group()
             # 历史轮数过多时升为 NORMAL（上下文复杂，fast 模型容易丢失上下文）
             if history_len > self.FAST_MAX_HISTORY:
                 return ComplexityTier.NORMAL, f"explicit={matched!r},history_upgrade={history_len}"

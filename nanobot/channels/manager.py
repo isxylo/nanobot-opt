@@ -60,9 +60,10 @@ class ChannelManager:
     def _validate_allow_from(self) -> None:
         for name, ch in self.channels.items():
             if getattr(ch.config, "allow_from", None) == []:
-                raise SystemExit(
-                    f'Error: "{name}" has empty allowFrom (denies all). '
-                    f'Set ["*"] to allow everyone, or add specific user IDs.'
+                logger.warning(
+                    'Channel "{}" has empty allowFrom — all messages will be rejected. '
+                    'Set ["*"] to allow everyone, or add specific user IDs.',
+                    name,
                 )
 
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:

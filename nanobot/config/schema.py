@@ -199,7 +199,7 @@ class QQConfig(Base):
     secret: str = ""  # 机器人密钥 (AppSecret) from q.qq.com
     allow_from: list[str] = Field(
         default_factory=list
-    )  # Allowed user openids (empty = public access)
+    )  # Allowed user openids. Empty list = deny all. Use ["*"] for public access.
     msg_format: Literal["plain", "markdown"] = "plain"  # Message format: plain text or markdown
 
 
