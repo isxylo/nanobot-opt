@@ -79,7 +79,12 @@ class ExecTool(Tool):
         self, command: str, working_dir: str | None = None,
         timeout: int | None = None, **kwargs: Any,
     ) -> str:
-        cwd = working_dir or self.working_dir or os.getcwd()
+        # When restrict_to_workspace is enabled, ignore caller-supplied working_dir
+        # to prevent LLM from escaping the workspace by setting an arbitrary cwd.
+        if self.restrict_to_workspace:
+            cwd = self.working_dir or os.getcwd()
+        else:
+            cwd = working_dir or self.working_dir or os.getcwd()
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
