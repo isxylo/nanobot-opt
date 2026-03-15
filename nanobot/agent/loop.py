@@ -54,18 +54,18 @@ class _StreamBuffer:
 
     async def push(self, delta: str) -> None:
         self._buf += delta
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         if now - self._last_flush >= self.FLUSH_INTERVAL:
             await self._flush()
 
     async def flush_final(self) -> str:
-        """Flush remaining buffer and return accumulated content."""
+        """Flush any remaining buffered content and return the accumulated string."""
         if self._buf:
             await self._flush()
         return self._buf
 
     async def _flush(self) -> None:
-        self._last_flush = asyncio.get_event_loop().time()
+        self._last_flush = asyncio.get_running_loop().time()
         await self._on_delta(self._buf)
 
 
@@ -400,12 +400,10 @@ class AgentLoop:
         await hybrid.load_boot()
         self._hybrid_memory = hybrid
 
-        # Patch context builder and consolidator with hybrid memory
+        # Configure context builder and consolidator with hybrid memory
         self.context._hybrid_memory = hybrid
         dual_write = cfg.backend == "hybrid" and adapter is not None
-        self.memory_consolidator._nocturne = adapter
-        self.memory_consolidator._dual_write = dual_write
-        self.memory_consolidator._hybrid_memory = hybrid
+        self.memory_consolidator.configure_nocturne(adapter, dual_write, hybrid)
         logger.info(
             "Memory backend: {} (adapter={}, dual_write={})",
             cfg.backend, adapter is not None, dual_write,
@@ -754,6 +752,7 @@ class AgentLoop:
 
         # Model routing: select tier based on message complexity
         model_to_use = self.model
+        route = None
         if self.router:
             route = self.router.route(msg.content, len(history))
             model_to_use = route.model
@@ -762,7 +761,7 @@ class AgentLoop:
                 route.tier, route.model, route.reason, msg.content[:40],
             )
 
-        current_tier = route.tier if self.router else None
+        current_tier = route.tier if route is not None else None
         if self.router and current_tier:
             meta_key = f"route_{current_tier}"
             session.metadata[meta_key] = session.metadata.get(meta_key, 0) + 1

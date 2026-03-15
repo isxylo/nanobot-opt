@@ -387,6 +387,17 @@ class MemoryConsolidator:
         self._hybrid_memory: "HybridMemoryContext | None" = None  # set by _init_hybrid_memory
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
+    def configure_nocturne(
+        self,
+        adapter: "NocturneMCPAdapter | None",
+        dual_write: bool,
+        hybrid_memory: "HybridMemoryContext | None" = None,
+    ) -> None:
+        """Set nocturne MCP adapter after MCP connection is established."""
+        self._nocturne = adapter
+        self._dual_write = dual_write
+        self._hybrid_memory = hybrid_memory
+
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())

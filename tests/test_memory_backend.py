@@ -52,7 +52,7 @@ async def test_nocturne_adapter_read_boot_success():
     adapter = NocturneMCPAdapter(tools)
     result = await adapter.read_boot()
     assert result == "# Core Memories\nloaded: 2"
-    tools.execute.assert_called_once_with("read_memory", {"uri": "system://boot"})
+    tools.execute.assert_called_once_with("mcp_nocturne_memory_read_memory", {"uri": "system://boot"})
 
 
 @pytest.mark.asyncio
@@ -131,8 +131,8 @@ async def test_write_memory_updates_existing_node_with_patch():
     ok = await adapter.write_memory("core://", "new content", title="nanobot_memory")
     assert ok is True
     calls = tools.execute.call_args_list
-    assert calls[0][0][0] == "read_memory"
-    assert calls[1][0][0] == "update_memory"
+    assert calls[0][0][0] == "mcp_nocturne_memory_read_memory"
+    assert calls[1][0][0] == "mcp_nocturne_memory_update_memory"
     update_args = calls[1][0][1]
     # Must use patch mode (old_string + new_string), NOT append alone
     assert update_args.get("old_string") == existing_content
@@ -151,7 +151,7 @@ async def test_write_memory_returns_false_when_content_unextractable():
     assert ok is False
     # Must NOT have called update_memory (no append)
     calls = [c[0][0] for c in tools.execute.call_args_list]
-    assert "update_memory" not in calls
+    assert "mcp_nocturne_memory_update_memory" not in calls
 
 
 @pytest.mark.asyncio
@@ -166,8 +166,8 @@ async def test_write_memory_creates_when_node_missing():
     ok = await adapter.write_memory("core://", "new content", title="nanobot_memory")
     assert ok is True
     calls = tools.execute.call_args_list
-    assert calls[0][0][0] == "read_memory"
-    assert calls[1][0][0] == "create_memory"
+    assert calls[0][0][0] == "mcp_nocturne_memory_read_memory"
+    assert calls[1][0][0] == "mcp_nocturne_memory_create_memory"
 
 
 @pytest.mark.asyncio
@@ -184,11 +184,11 @@ async def test_write_memory_nocturne_rejects_mutual_exclusive_params():
     read_response = f"{sep}\nMEMORY: core://x\nMemory ID: 1\n{sep}\n\n{existing}\n\n{sep}\n"
 
     async def _strict_update(name, args):
-        if name == "update_memory":
+        if name == "mcp_nocturne_memory_update_memory":
             if args.get("old_string") is not None and args.get("append") is not None:
                 return "Error: Cannot use both old_string/new_string (patch) and append at the same time."
             return "Success: updated"
-        if name == "read_memory":
+        if name == "mcp_nocturne_memory_read_memory":
             return read_response
         return "Success"
 
