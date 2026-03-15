@@ -17,6 +17,14 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import HybridMemoryContext, MemoryConsolidator, MemoryStore, NocturneMCPAdapter, RunLogger
 from nanobot.agent.router import FailoverReason, ModelRouter, build_router_from_config, classify_error
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.tools.browser import (
+    BrowserOpenTool,
+    BrowserSessionManager,
+    PageClickTool,
+    PageGetHtmlTool,
+    PageGetTextTool,
+    PageScreenshotTool,
+)
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
@@ -30,7 +38,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from nanobot.config.schema import BrowserToolsConfig, ChannelsConfig, ExecToolConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -86,6 +94,7 @@ class AgentLoop:
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
+        browser_config: BrowserToolsConfig | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
@@ -94,7 +103,7 @@ class AgentLoop:
         router: ModelRouter | None = None,
         memory_config=None,
     ):
-        from nanobot.config.schema import ExecToolConfig, MemoryConfig, WebSearchConfig
+        from nanobot.config.schema import BrowserToolsConfig, ExecToolConfig, MemoryConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -106,6 +115,7 @@ class AgentLoop:
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
+        self.browser_config = browser_config or BrowserToolsConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
@@ -128,6 +138,7 @@ class AgentLoop:
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
+        self._browser_manager: BrowserSessionManager | None = None
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-session locks
         self._session_pending: dict[str, int] = {}  # per-session pending count
@@ -162,6 +173,19 @@ class AgentLoop:
         ))
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
+        if self.browser_config.enabled:
+            self._browser_manager = BrowserSessionManager(
+                workspace=self.workspace,
+                headless=self.browser_config.headless,
+                timeout_ms=self.browser_config.timeout_ms,
+                max_chars=self.browser_config.max_chars,
+                screenshot_dir=self.browser_config.screenshot_dir,
+            )
+            self.tools.register(BrowserOpenTool(self._browser_manager))
+            self.tools.register(PageGetTextTool(self._browser_manager))
+            self.tools.register(PageGetHtmlTool(self._browser_manager))
+            self.tools.register(PageScreenshotTool(self._browser_manager))
+            self.tools.register(PageClickTool(self._browser_manager))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
@@ -357,9 +381,9 @@ class AgentLoop:
 
         # Build adapter only if nocturne MCP server is registered and connected
         adapter: NocturneMCPAdapter | None = None
-        nocturne_tool = self.tools.get("read_memory")
+        nocturne_tool = self.tools.get(f"mcp_{cfg.mcp_server_name}_read_memory")
         if nocturne_tool is not None:
-            adapter = NocturneMCPAdapter(self.tools)
+            adapter = NocturneMCPAdapter(self.tools, server_name=cfg.mcp_server_name)
         elif cfg.backend in ("nocturne_mcp", "hybrid"):
             logger.warning(
                 "memory.backend={} but 'read_memory' tool not found — "
@@ -544,6 +568,8 @@ class AgentLoop:
             except (RuntimeError, BaseExceptionGroup):
                 pass  # MCP SDK cancel scope cleanup is noisy but harmless
             self._mcp_stack = None
+        if self._browser_manager:
+            await self._browser_manager.close()
 
     def stop(self) -> None:
         """Stop the agent loop."""

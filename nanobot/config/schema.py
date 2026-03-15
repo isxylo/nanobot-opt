@@ -333,6 +333,16 @@ class WebToolsConfig(Base):
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
+class BrowserToolsConfig(Base):
+    """Native browser tools configuration (Camoufox)."""
+
+    enabled: bool = True
+    headless: bool = True
+    timeout_ms: int = 30_000
+    max_chars: int = 120_000
+    screenshot_dir: str = "artifacts/browser"
+
+
 class ExecToolConfig(Base):
     """Shell exec tool configuration."""
 
@@ -367,6 +377,7 @@ class ToolsConfig(Base):
     """Tools configuration."""
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
+    browser: BrowserToolsConfig = Field(default_factory=BrowserToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)

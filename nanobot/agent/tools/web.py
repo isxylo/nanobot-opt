@@ -384,8 +384,8 @@ class WebFetchTool(Tool):
                 return json.dumps({
                     "error": "该页面受 Cloudflare 或 JS 渲染保护，普通 HTTP 请求被拦截。",
                     "url": url,
-                    "suggestion": "请改用 jshook MCP 的浏览器工具（如 browser_navigate + browser_get_text）访问此页面。",
-                    "fallback": "jshook_browser",
+                    "suggestion": "请改用原生浏览器工具（browser_open + page_get_text）访问此页面。",
+                    "fallback": "native_browser",
                 }, ensure_ascii=False)
             return json.dumps({"error": err_str, "url": url}, ensure_ascii=False)
 

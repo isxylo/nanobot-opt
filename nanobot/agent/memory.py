@@ -405,7 +405,7 @@ class MemoryConsolidator:
             mcp_current: str | None = None
             try:
                 node_result = await self._nocturne._tools.execute(
-                    "read_memory", {"uri": "core://nanobot_memory"}
+                    self._nocturne._prefix + "read_memory", {"uri": "core://nanobot_memory"}
                 )
                 if node_result and not node_result.startswith("Error:"):
                     mcp_current = _extract_nocturne_content(node_result)
@@ -586,14 +586,15 @@ class NocturneMCPAdapter:
     so they never block the main agent flow.
     """
 
-    def __init__(self, tools) -> None:
+    def __init__(self, tools, server_name: str = "nocturne_memory") -> None:
         """Accept a ToolRegistry (or any object with .execute(name, args))."""
         self._tools = tools
+        self._prefix = f"mcp_{server_name}_"
 
     async def read_boot(self) -> str | None:
         """Call read_memory('system://boot') and return the content string."""
         try:
-            result = await self._tools.execute("read_memory", {"uri": "system://boot"})
+            result = await self._tools.execute(self._prefix + "read_memory", {"uri": "system://boot"})
             if result and not result.startswith("Error:"):
                 return result
             logger.warning("NocturneMCPAdapter: boot read failed: {}", result)
@@ -617,7 +618,7 @@ class NocturneMCPAdapter:
 
         try:
             # Probe: check if node already exists
-            read_result = await self._tools.execute("read_memory", {"uri": uri})
+            read_result = await self._tools.execute(self._prefix + "read_memory", {"uri": uri})
             node_exists = read_result and not read_result.startswith("Error:")
         except Exception:
             node_exists = False
@@ -637,7 +638,7 @@ class NocturneMCPAdapter:
                         "skipping update to avoid content bloat", uri
                     )
                     return False
-                update_result = await self._tools.execute("update_memory", {
+                update_result = await self._tools.execute(self._prefix + "update_memory", {
                     "uri": uri,
                     "old_string": current_content,
                     "new_string": content,
@@ -651,7 +652,7 @@ class NocturneMCPAdapter:
                 return False
 
         try:
-            create_result = await self._tools.execute("create_memory", {
+            create_result = await self._tools.execute(self._prefix + "create_memory", {
                 "parent_uri": parent_uri,
                 "content": content,
                 "priority": priority,

@@ -13,3 +13,17 @@ This file documents non-obvious constraints and usage patterns.
 ## cron — Scheduled Reminders
 
 - Please refer to cron skill for usage.
+
+## Native Browser Tools
+
+Use native browser tools when a page needs JS rendering, login state, or anti-bot handling.
+
+1. Standard flow:
+   `browser_open(url) -> page_get_text()`
+2. If text extraction is incomplete, use:
+   `page_get_html()`
+3. To interact before extraction:
+   `page_click(selector)` then `page_get_text()`
+4. To inspect visual state:
+   `page_screenshot()`
+5. If `web_fetch` returns Cloudflare/JS block, switch to native browser tools directly.
