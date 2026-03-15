@@ -1,3 +1,4 @@
+import pytest
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.loop import AgentLoop
 from nanobot.session.manager import Session
@@ -9,15 +10,18 @@ def _mk_loop() -> AgentLoop:
     loop._TOOL_RESULT_MAX_CHARS = AgentLoop._TOOL_RESULT_MAX_CHARS
     loop._run_logger = MagicMock()
     loop._run_logger.write_turn = MagicMock()
+    loop._stats_lock = pytest.importorskip("asyncio").Lock()
+    loop.workspace = pytest.importorskip("pathlib").Path("/tmp")
     return loop
 
 
-def test_save_turn_skips_multimodal_user_when_only_runtime_context() -> None:
+@pytest.mark.asyncio
+async def test_save_turn_skips_multimodal_user_when_only_runtime_context() -> None:
     loop = _mk_loop()
     session = Session(key="test:runtime-only")
     runtime = ContextBuilder._RUNTIME_CONTEXT_TAG + "\nCurrent Time: now (UTC)"
 
-    loop._save_turn(
+    await loop._save_turn(
         session,
         [{"role": "user", "content": [{"type": "text", "text": runtime}]}],
         skip=0,
@@ -25,12 +29,13 @@ def test_save_turn_skips_multimodal_user_when_only_runtime_context() -> None:
     assert session.messages == []
 
 
-def test_save_turn_keeps_image_placeholder_after_runtime_strip() -> None:
+@pytest.mark.asyncio
+async def test_save_turn_keeps_image_placeholder_after_runtime_strip() -> None:
     loop = _mk_loop()
     session = Session(key="test:image")
     runtime = ContextBuilder._RUNTIME_CONTEXT_TAG + "\nCurrent Time: now (UTC)"
 
-    loop._save_turn(
+    await loop._save_turn(
         session,
         [{
             "role": "user",
@@ -44,12 +49,13 @@ def test_save_turn_keeps_image_placeholder_after_runtime_strip() -> None:
     assert session.messages[0]["content"] == [{"type": "text", "text": "[image]"}]
 
 
-def test_save_turn_keeps_tool_results_under_16k() -> None:
+@pytest.mark.asyncio
+async def test_save_turn_keeps_tool_results_under_16k() -> None:
     loop = _mk_loop()
     session = Session(key="test:tool-result")
     content = "x" * 12_000
 
-    loop._save_turn(
+    await loop._save_turn(
         session,
         [{"role": "tool", "tool_call_id": "call_1", "name": "read_file", "content": content}],
         skip=0,

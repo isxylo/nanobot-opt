@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, AsyncIterator
@@ -145,6 +146,7 @@ class AgentLoop:
         self._session_queued: dict[str, list[InboundMessage]] = {}  # per-session queued msgs for drain merge
         self._max_pending_per_session = 3  # 超过此数量的排队消息直接丢弃
         self._global_semaphore = asyncio.Semaphore(10)  # 全局最大并发 session 数
+        self._stats_lock = asyncio.Lock()  # 保护 usage_stats.json 并发写入
         self.router = router
         self._run_logger = RunLogger(workspace)
         self._memory_config = memory_config  # MemoryConfig | None
@@ -596,7 +598,7 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
             final_content, _, all_msgs, usage, _ = await self._run_agent_loop(messages)
-            self._save_turn(session, all_msgs, 1 + len(history), usage)
+            await self._save_turn(session, all_msgs, 1 + len(history), usage)
             self.sessions.save(session)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -801,11 +803,9 @@ class AgentLoop:
             final_content = "I've completed processing but have no response to give."
 
         elapsed_ms = int((_time.monotonic() - _turn_start) * 1000)
-        had_error = final_content is not None and (
-            final_content.startswith("Sorry") or "错误" in final_content[:30]
-        )
+        had_error = finish_reason == "error"
         self._record_turn_metrics(session, elapsed_ms, had_error)
-        self._save_turn(session, all_msgs, 1 + len(history), usage)
+        await self._save_turn(session, all_msgs, 1 + len(history), usage)
         self.sessions.save(session)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
@@ -844,27 +844,28 @@ class AgentLoop:
         except Exception:
             return {}
 
-    def _update_global_stats(self, usage: dict) -> None:
-        """Accumulate usage into workspace-level stats file."""
+    async def _update_global_stats(self, usage: dict) -> None:
+        """Accumulate usage into workspace-level stats file (serialized via lock)."""
         import json as _json
         path = self.workspace / "usage_stats.json"
-        stats = self._load_global_stats()
-        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            stats[k] = stats.get(k, 0) + usage.get(k, 0)
-        # total_tokens may not be provided by all providers
-        if "total_tokens" not in usage:
-            stats["total_tokens"] = stats.get("total_tokens", 0) + usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
-        try:
-            path.write_text(_json.dumps(stats, ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            pass
+        async with self._stats_lock:
+            stats = self._load_global_stats()
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                stats[k] = stats.get(k, 0) + usage.get(k, 0)
+            # total_tokens may not be provided by all providers
+            if "total_tokens" not in usage:
+                stats["total_tokens"] = stats.get("total_tokens", 0) + usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+            try:
+                path.write_text(_json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
 
-    def _save_turn(self, session: Session, messages: list[dict], skip: int, usage: dict | None = None) -> None:
+    async def _save_turn(self, session: Session, messages: list[dict], skip: int, usage: dict | None = None) -> None:
         """Save new-turn messages into session, truncating large tool results."""
         if usage:
             for k, v in usage.items():
                 session.metadata[k] = session.metadata.get(k, 0) + v
-            self._update_global_stats(usage)
+            await self._update_global_stats(usage)
         from datetime import datetime
         session_start = len(session.messages)
         for m in messages[skip:]:
