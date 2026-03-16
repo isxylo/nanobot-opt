@@ -848,7 +848,7 @@ class AgentLoop:
         self.sessions.save(session)
         for tool_name in tools_used:
             if self.context.skills.load_skill(tool_name) is not None:
-                self.context.skill_stats.record(tool_name, success=not had_error)
+                asyncio.create_task(self.context.skill_stats.record_async(tool_name))
         if self._eval_runner and self._eval_runner.should_run_after_turn():
             if self._eval_task is None or self._eval_task.done():
                 self._eval_task = asyncio.create_task(self._run_eval_background())

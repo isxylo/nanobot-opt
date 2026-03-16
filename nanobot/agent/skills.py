@@ -18,6 +18,13 @@ class SkillStats:
     def __init__(self, workspace: Path) -> None:
         self._path = workspace / "skills" / "SKILL_STATS.json"
         self._data: dict = self._load()
+        self._lock: "asyncio.Lock | None" = None  # lazy-init to avoid event loop issues
+
+    def _get_lock(self) -> "asyncio.Lock":
+        import asyncio
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def _load(self) -> dict:
         if self._path.exists():
@@ -27,18 +34,31 @@ class SkillStats:
                 return {}
         return {}
 
-    def _save(self) -> None:
+    def _save_atomic(self) -> None:
+        """Write to a temp file then rename for atomic update."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self._path)
+
+    async def record_async(self, skill_name: str) -> None:
+        """Record one successful invocation of a skill (async, non-blocking)."""
+        import asyncio
+        async with self._get_lock():
+            entry = self._data.setdefault(skill_name, {"calls": 0, "success": 0, "last_used": ""})
+            entry["calls"] += 1
+            entry["success"] += 1
+            entry["last_used"] = datetime.now().strftime("%Y-%m-%d")
+            await asyncio.to_thread(self._save_atomic)
 
     def record(self, skill_name: str, success: bool) -> None:
-        """Record one invocation of a skill."""
+        """Sync record — for use in non-async contexts only (tests, CLI)."""
         entry = self._data.setdefault(skill_name, {"calls": 0, "success": 0, "last_used": ""})
         entry["calls"] += 1
         if success:
             entry["success"] += 1
         entry["last_used"] = datetime.now().strftime("%Y-%m-%d")
-        self._save()
+        self._save_atomic()
 
     def success_rate(self, skill_name: str) -> float:
         entry = self._data.get(skill_name)
