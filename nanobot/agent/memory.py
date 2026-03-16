@@ -108,6 +108,45 @@ def _normalize_save_memory_args(args: Any) -> dict[str, Any] | None:
         return args[0] if args and isinstance(args[0], dict) else None
     return args if isinstance(args, dict) else None
 
+_SAVE_REFLECTION_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "save_reflection",
+            "description": "Save a structured reflection entry derived from the conversation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scenario": {
+                        "type": "string",
+                        "description": "The type of situation or task context.",
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "What the agent did.",
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "description": "What happened as a result (success/failure and why).",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence in this rule (0.0-1.0).",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                    },
+                    "rule": {
+                        "type": "string",
+                        "description": "The actionable heuristic or rule derived from this experience.",
+                    },
+                },
+                "required": ["scenario", "action", "outcome", "confidence", "rule"],
+            },
+        },
+    }
+]
+
+
 _TOOL_CHOICE_ERROR_MARKERS = (
     "tool_choice",
     "toolchoice",
@@ -337,6 +376,192 @@ class MemoryStore:
             logger.exception("MemoryStore.summarize_only failed")
             return None
 
+    async def reflect(
+        self,
+        messages: list[dict],
+        provider: "LLMProvider",
+        model: str,
+        min_confidence: float = 0.7,
+    ) -> bool:
+        """Extract a structured experience rule from the conversation and write to # candidates.
+
+        The rule is NOT written directly to # lessons — it stays in # candidates
+        until promoted by promote_candidates() after being validated by later interactions.
+        """
+        if not messages:
+            return False
+
+        current_memory = await self.read_long_term_async()
+        prompt = (
+            "Analyze this conversation and extract one actionable heuristic or rule "
+            "that could help in future similar situations. "
+            "Call save_reflection with a structured entry.\n\n"
+            f"## Conversation\n{self._format_messages(messages)}"
+        )
+        chat_messages = [
+            {"role": "system", "content": "You are a reflection agent. Derive one concise, actionable rule from the conversation and call save_reflection."},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            forced = {"type": "function", "function": {"name": "save_reflection"}}
+            response = await provider.chat_with_retry(
+                messages=chat_messages,
+                tools=_SAVE_REFLECTION_TOOL,
+                model=model,
+                tool_choice=forced,
+            )
+            if response.finish_reason == "error" and _is_tool_choice_unsupported(response.content):
+                response = await provider.chat_with_retry(
+                    messages=chat_messages,
+                    tools=_SAVE_REFLECTION_TOOL,
+                    model=model,
+                    tool_choice="auto",
+                )
+            if not response.has_tool_calls:
+                logger.warning("Reflection: LLM did not call save_reflection")
+                return False
+
+            args = response.tool_calls[0].arguments
+            if isinstance(args, str):
+                import json as _json
+                args = _json.loads(args)
+            if not isinstance(args, dict):
+                return False
+
+            confidence = float(args.get("confidence", 0.0))
+            rule = str(args.get("rule", "")).strip()
+            if not rule:
+                return False
+
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            entry = f"- {rule} <!-- confidence:{confidence:.2f} added:{date_str} hits:0 -->"
+            await self._append_candidates_async(entry)
+            logger.info("Reflection: added candidate rule (confidence={:.2f})", confidence)
+            return True
+        except Exception:
+            logger.exception("Reflection failed")
+            return False
+
+    async def _append_candidates_async(self, entry: str) -> None:
+        """Append an entry to the # candidates section in MEMORY.md, creating it if needed."""
+        await asyncio.to_thread(self._append_candidates, entry)
+
+    def _append_candidates(self, entry: str) -> None:
+        content = self.memory_file.read_text(encoding="utf-8") if self.memory_file.exists() else ""
+        candidates_heading = "# candidates"
+        if candidates_heading in content:
+            # Insert before the next top-level heading after # candidates
+            lines = content.splitlines()
+            insert_idx = None
+            in_section = False
+            for i, line in enumerate(lines):
+                if line.strip().lower() == candidates_heading:
+                    in_section = True
+                    continue
+                if in_section and line.startswith("# ") and line.strip().lower() != candidates_heading:
+                    insert_idx = i
+                    break
+            if insert_idx is not None:
+                lines.insert(insert_idx, entry)
+            else:
+                lines.append(entry)
+            self.memory_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        else:
+            # Append new # candidates section at end
+            with open(self.memory_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{candidates_heading}\n{entry}\n")
+
+    def promote_candidates(self, min_confidence: float = 0.7) -> int:
+        """Promote high-confidence candidates to # lessons. Returns count promoted."""
+        if not self.memory_file.exists():
+            return 0
+        import re
+        content = self.memory_file.read_text(encoding="utf-8")
+        candidate_pattern = re.compile(
+            r'^(- .+<!-- confidence:([0-9.]+) added:(\S+) hits:(\d+) -->)$',
+            re.MULTILINE,
+        )
+        to_promote = []
+        for m in candidate_pattern.finditer(content):
+            conf = float(m.group(2))
+            hits = int(m.group(4))
+            if conf >= min_confidence and hits >= 1:
+                to_promote.append(m.group(0))
+
+        if not to_promote:
+            return 0
+
+        lessons_heading = "# lessons"
+        for entry in to_promote:
+            content = content.replace(entry + "\n", "").replace(entry, "")
+            if lessons_heading in content:
+                lines = content.splitlines()
+                insert_idx = None
+                in_section = False
+                for i, line in enumerate(lines):
+                    if line.strip().lower() == lessons_heading:
+                        in_section = True
+                        continue
+                    if in_section and line.startswith("# ") and line.strip().lower() != lessons_heading:
+                        insert_idx = i
+                        break
+                if insert_idx is not None:
+                    lines.insert(insert_idx, entry)
+                else:
+                    lines.append(entry)
+                content = "\n".join(lines) + "\n"
+            else:
+                content = content.rstrip() + f"\n\n{lessons_heading}\n{entry}\n"
+
+        self.memory_file.write_text(content, encoding="utf-8")
+        logger.info("Reflection: promoted {} candidates to lessons", len(to_promote))
+        return len(to_promote)
+
+    def prune_memory(self, min_score: float = 0.3) -> int:
+        """Score and archive low-quality memory entries. Returns count pruned."""
+        if not self.memory_file.exists():
+            return 0
+        import re
+        from datetime import date
+
+        content = self.memory_file.read_text(encoding="utf-8")
+        today = date.today()
+        entry_pattern = re.compile(
+            r'^(- .+<!-- (?:score:[0-9.]+ )?recency:(\S+) hits:(\d+)[^>]* -->)$',
+            re.MULTILINE,
+        )
+
+        pruned = []
+        kept_lines = content.splitlines(keepends=True)
+
+        for m in entry_pattern.finditer(content):
+            entry = m.group(0)
+            try:
+                recency_date = date.fromisoformat(m.group(2))
+                days_old = (today - recency_date).days
+                recency_score = max(0.0, 1.0 - days_old / 365.0)
+            except ValueError:
+                recency_score = 0.5
+            hits = int(m.group(3))
+            hits_score = min(1.0, hits / 10.0)
+            score = recency_score * 0.4 + hits_score * 0.4 + 0.2  # reliability baseline 0.2
+            if score < min_score:
+                pruned.append(entry)
+
+        if not pruned:
+            return 0
+
+        for entry in pruned:
+            content = content.replace(entry + "\n", "").replace(entry, "")
+
+        self.memory_file.write_text(content, encoding="utf-8")
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        archive_block = f"[{ts}] [PRUNED] {len(pruned)} low-score entries\n" + "\n".join(pruned)
+        self.append_history(archive_block)
+        logger.info("Memory prune: archived {} low-score entries", len(pruned))
+        return len(pruned)
+
     def _fail_or_raw_archive(self, messages: list[dict]) -> bool:
         """Increment failure count; after threshold, raw-archive messages and return True."""
         self._consecutive_failures += 1
@@ -374,6 +599,7 @@ class MemoryConsolidator:
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         nocturne_adapter: "NocturneMCPAdapter | None" = None,
         dual_write: bool = False,
+        memory_config=None,
     ):
         self.store = MemoryStore(workspace)
         self.provider = provider
@@ -384,6 +610,7 @@ class MemoryConsolidator:
         self._get_tool_definitions = get_tool_definitions
         self._nocturne = nocturne_adapter
         self._dual_write = dual_write
+        self._memory_config = memory_config  # MemoryConfig | None
         self._hybrid_memory: "HybridMemoryContext | None" = None  # set by _init_hybrid_memory
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
@@ -452,7 +679,37 @@ class MemoryConsolidator:
                     priority=2,
                     disclosure="当需要了解用户偏好和历史对话摘要时",
                 ))
+        if ok:
+            asyncio.create_task(self._post_consolidate(messages))
         return ok
+
+    async def _post_consolidate(self, messages: list[dict]) -> None:
+        """Run reflection and prune after a successful consolidation (background, non-blocking)."""
+        cfg = self._memory_config
+        if cfg is None:
+            return
+        # 1. Reflection
+        if cfg.reflection.enabled:
+            reflect_model = cfg.reflection.model or self.model
+            try:
+                await self.store.reflect(
+                    messages, self.provider, reflect_model,
+                    min_confidence=cfg.reflection.min_confidence,
+                )
+                self.store.promote_candidates(min_confidence=cfg.reflection.min_confidence)
+            except Exception:
+                logger.exception("_post_consolidate: reflection error")
+        # 2. Prune
+        if cfg.prune.enabled:
+            try:
+                lines = len(self.store.memory_file.read_text(encoding="utf-8").splitlines()) \
+                    if self.store.memory_file.exists() else 0
+                if lines >= cfg.prune.trigger_lines:
+                    await asyncio.to_thread(
+                        self.store.prune_memory, cfg.prune.min_score
+                    )
+            except Exception:
+                logger.exception("_post_consolidate: prune error")
 
     def pick_consolidation_boundary(
         self,
