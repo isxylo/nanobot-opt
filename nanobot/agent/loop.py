@@ -159,7 +159,7 @@ class AgentLoop:
             from nanobot.agent.eval import EvalRunner
             self._eval_runner = EvalRunner(eval_config, workspace)
         self._skill_autogen_config = skill_autogen_config  # SkillAutoGenConfig | None
-        self._command_patterns: dict[str, list[str]] = {}  # pattern -> [example_cmds]
+        self._command_patterns: dict[str, list] = {}  # pattern -> [call_count, [example_cmds]]
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
