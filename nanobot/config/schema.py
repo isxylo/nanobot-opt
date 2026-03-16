@@ -368,15 +368,15 @@ class ReflectionConfig(Base):
 
     enabled: bool = False  # Kill switch — disabled by default
     model: str = ""  # Leave empty to use the agent's default model
-    min_confidence: float = 0.7  # Rules below this confidence stay in candidates
+    min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)  # Rules below this confidence stay in candidates
 
 
 class PruneConfig(Base):
     """Memory quality scoring and pruning configuration (P1 evolution feature)."""
 
     enabled: bool = False  # Kill switch — disabled by default
-    trigger_lines: int = 100  # Trigger pruning when MEMORY.md exceeds this line count
-    min_score: float = 0.3  # Entries below this score are archived to HISTORY.md
+    trigger_lines: int = Field(default=100, ge=1)  # Trigger pruning when MEMORY.md exceeds this line count
+    min_score: float = Field(default=0.3, ge=0.0, le=1.0)  # Entries below this score are archived to HISTORY.md
 
 
 class MemoryConfig(Base):

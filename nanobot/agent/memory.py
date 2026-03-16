@@ -171,6 +171,7 @@ class MemoryStore:
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
         self._consecutive_failures = 0
+        self._file_lock = asyncio.Lock()  # serialises all reflect/promote/prune writes
 
     def read_long_term(self) -> str:
         if self.memory_file.exists():
@@ -381,7 +382,6 @@ class MemoryStore:
         messages: list[dict],
         provider: "LLMProvider",
         model: str,
-        min_confidence: float = 0.7,
     ) -> bool:
         """Extract a structured experience rule from the conversation and write to # candidates.
 
@@ -391,7 +391,6 @@ class MemoryStore:
         if not messages:
             return False
 
-        current_memory = await self.read_long_term_async()
         prompt = (
             "Analyze this conversation and extract one actionable heuristic or rule "
             "that could help in future similar situations. "
@@ -444,7 +443,8 @@ class MemoryStore:
 
     async def _append_candidates_async(self, entry: str) -> None:
         """Append an entry to the # candidates section in MEMORY.md, creating it if needed."""
-        await asyncio.to_thread(self._append_candidates, entry)
+        async with self._file_lock:
+            await asyncio.to_thread(self._append_candidates, entry)
 
     def _append_candidates(self, entry: str) -> None:
         content = self.memory_file.read_text(encoding="utf-8") if self.memory_file.exists() else ""
@@ -472,7 +472,12 @@ class MemoryStore:
                 f.write(f"\n{candidates_heading}\n{entry}\n")
 
     def promote_candidates(self, min_confidence: float = 0.7) -> int:
-        """Promote high-confidence candidates to # lessons. Returns count promoted."""
+        """Promote high-confidence candidates to # lessons. Returns count promoted.
+
+        Promotion condition: confidence >= min_confidence (hits no longer required,
+        since there is no automatic hits-increment path yet).
+        Uses line-index deletion to avoid removing duplicate entries accidentally.
+        """
         if not self.memory_file.exists():
             return 0
         import re
@@ -484,21 +489,28 @@ class MemoryStore:
         to_promote = []
         for m in candidate_pattern.finditer(content):
             conf = float(m.group(2))
-            hits = int(m.group(4))
-            if conf >= min_confidence and hits >= 1:
+            if conf >= min_confidence:
                 to_promote.append(m.group(0))
 
         if not to_promote:
             return 0
 
+        # Remove by line index (first occurrence only) to avoid deleting duplicates
+        lines = content.splitlines()
+        for entry in to_promote:
+            for i, line in enumerate(lines):
+                if line == entry:
+                    lines.pop(i)
+                    break
+
+        content = "\n".join(lines) + "\n"
         lessons_heading = "# lessons"
         for entry in to_promote:
-            content = content.replace(entry + "\n", "").replace(entry, "")
             if lessons_heading in content:
-                lines = content.splitlines()
+                ins_lines = content.splitlines()
                 insert_idx = None
                 in_section = False
-                for i, line in enumerate(lines):
+                for i, line in enumerate(ins_lines):
                     if line.strip().lower() == lessons_heading:
                         in_section = True
                         continue
@@ -506,10 +518,10 @@ class MemoryStore:
                         insert_idx = i
                         break
                 if insert_idx is not None:
-                    lines.insert(insert_idx, entry)
+                    ins_lines.insert(insert_idx, entry)
                 else:
-                    lines.append(entry)
-                content = "\n".join(lines) + "\n"
+                    ins_lines.append(entry)
+                content = "\n".join(ins_lines) + "\n"
             else:
                 content = content.rstrip() + f"\n\n{lessons_heading}\n{entry}\n"
 
@@ -551,8 +563,16 @@ class MemoryStore:
         if not pruned:
             return 0
 
-        for entry in pruned:
-            content = content.replace(entry + "\n", "").replace(entry, "")
+        # Remove by line index (first occurrence only) to avoid deleting duplicates
+        pruned_set = set(pruned)
+        new_lines = []
+        removed = set()
+        for line in content.splitlines():
+            if line in pruned_set and line not in removed:
+                removed.add(line)
+            else:
+                new_lines.append(line)
+        content = "\n".join(new_lines) + "\n"
 
         self.memory_file.write_text(content, encoding="utf-8")
 
@@ -688,26 +708,29 @@ class MemoryConsolidator:
         cfg = self._memory_config
         if cfg is None:
             return
-        # 1. Reflection
+        # 1. Reflection — acquire file lock for the whole reflect+promote sequence
         if cfg.reflection.enabled:
             reflect_model = cfg.reflection.model or self.model
             try:
                 await self.store.reflect(
                     messages, self.provider, reflect_model,
-                    min_confidence=cfg.reflection.min_confidence,
                 )
-                self.store.promote_candidates(min_confidence=cfg.reflection.min_confidence)
+                async with self.store._file_lock:
+                    await asyncio.to_thread(
+                        self.store.promote_candidates, cfg.reflection.min_confidence
+                    )
             except Exception:
                 logger.exception("_post_consolidate: reflection error")
-        # 2. Prune
+        # 2. Prune — acquire file lock
         if cfg.prune.enabled:
             try:
                 lines = len(self.store.memory_file.read_text(encoding="utf-8").splitlines()) \
                     if self.store.memory_file.exists() else 0
                 if lines >= cfg.prune.trigger_lines:
-                    await asyncio.to_thread(
-                        self.store.prune_memory, cfg.prune.min_score
-                    )
+                    async with self.store._file_lock:
+                        await asyncio.to_thread(
+                            self.store.prune_memory, cfg.prune.min_score
+                        )
             except Exception:
                 logger.exception("_post_consolidate: prune error")
 
