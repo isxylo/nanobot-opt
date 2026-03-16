@@ -152,8 +152,6 @@ class AgentLoop:
         self.router = router
         self._run_logger = RunLogger(workspace)
         self._memory_config = memory_config  # MemoryConfig | None
-        if memory_config and hasattr(memory_config, 'lessons_file'):
-            self.context._lessons_file = workspace / memory_config.lessons_file
         self._hybrid_memory: HybridMemoryContext | None = None  # set after MCP connect
         self._eval_runner = None
         self._eval_task: asyncio.Task | None = None  # single-flight tracker
@@ -172,6 +170,8 @@ class AgentLoop:
             get_tool_definitions=self.tools.get_definitions,
             memory_config=memory_config,
         )
+        # Sync lessons_file from consolidator (already validated) to context
+        self.context._lessons_file = self.memory_consolidator.store.lessons_file
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
