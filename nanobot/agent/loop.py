@@ -599,7 +599,8 @@ class AgentLoop:
 
     def _track_command_pattern(self, tool_name: str, arguments: dict) -> None:
         """Track repeated command patterns for potential skill auto-generation."""
-        if not self._skill_autogen_config or not self._skill_autogen_config.enabled:
+        cfg = self._skill_autogen_config
+        if not cfg or not cfg.enabled:
             return
         # Only track shell/exec tools
         if tool_name not in ("exec", "shell", "bash"):
@@ -613,12 +614,18 @@ class AgentLoop:
         if not cmd:
             return
         pattern = f"{tool_name}:{cmd}"
-        # _command_patterns stores (call_count, [unique_examples])
+        # _command_patterns stores [call_count, [unique_examples]]
         entry = self._command_patterns.setdefault(pattern, [0, []])
-        entry[0] += 1  # always increment call count
+        entry[0] += 1  # increment call count for this pattern
         full_cmd = arguments.get("command") or arguments.get("cmd") or arguments.get("code") or ""
         if full_cmd and full_cmd not in entry[1]:
             entry[1].append(full_cmd[:120])
+        # If draft already exists, increment its uses counter (pattern hit this turn)
+        skill_name = pattern.replace(":", "-").replace("_", "-").lower()
+        from nanobot.agent.skills import SkillWriter
+        writer = SkillWriter(self.workspace)
+        if writer.draft_exists(skill_name):
+            writer.increment_uses(skill_name)
 
     def _maybe_generate_skill(self) -> None:
         """Check if any command pattern has reached the threshold and generate a draft skill."""
@@ -631,11 +638,10 @@ class AgentLoop:
             call_count, examples = entry
             if call_count < cfg.min_pattern_count:
                 continue
-            # Derive a skill name from the pattern (e.g. exec:git -> exec-git)
             skill_name = pattern.replace(":", "-").replace("_", "-").lower()
-            # If draft exists: increment uses and check for promotion
+            # Check for promotion if draft exists
             if writer.draft_exists(skill_name):
-                uses = writer.increment_uses(skill_name)
+                uses = writer.get_uses(skill_name)
                 if uses >= cfg.promote_after_uses:
                     try:
                         writer.promote(skill_name)
@@ -645,7 +651,7 @@ class AgentLoop:
                 continue
             if self.context.skills.load_skill(skill_name):
                 continue
-            # Check success rate using the base tool name (exec/shell/bash)
+            # Check success rate: exec/shell/bash tools are tracked directly in skill_stats
             base_tool = pattern.split(":")[0]
             rate = self.context.skill_stats.success_rate(base_tool)
             if rate > 0 and rate < cfg.min_success_rate:
@@ -913,8 +919,9 @@ class AgentLoop:
         self._record_turn_metrics(session, elapsed_ms, had_error)
         await self._save_turn(session, all_msgs, 1 + len(history), usage)
         self.sessions.save(session)
+        _shell_tools = {"exec", "shell", "bash"}
         for tool_name in tools_used:
-            if self.context.skills.load_skill(tool_name) is not None:
+            if self.context.skills.load_skill(tool_name) is not None or tool_name in _shell_tools:
                 asyncio.create_task(self.context.skill_stats.record_async(tool_name))
         self._maybe_generate_skill()
         if self._eval_runner and self._eval_runner.should_run_after_turn():
