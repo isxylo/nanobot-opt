@@ -153,6 +153,7 @@ class AgentLoop:
         self._memory_config = memory_config  # MemoryConfig | None
         self._hybrid_memory: HybridMemoryContext | None = None  # set after MCP connect
         self._eval_runner = None
+        self._eval_task: asyncio.Task | None = None  # single-flight tracker
         if eval_config and eval_config.enabled:
             from nanobot.agent.eval import EvalRunner
             self._eval_runner = EvalRunner(eval_config, workspace)
@@ -579,10 +580,22 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        if self._eval_task and not self._eval_task.done():
+            self._eval_task.cancel()
         logger.info("Agent loop stopping")
 
     async def _run_eval_background(self) -> None:
-        """Run eval suite in background; results written to BENCHMARK.md."""
+        """Run eval suite in background; results written to BENCHMARK.md.
+
+        Side-effect tools (message, spawn, cron) are temporarily disabled
+        during eval to prevent accidental outbound messages or task creation.
+        """
+        # Stash and remove side-effect tools for the duration of the eval
+        _SIDE_EFFECT_TOOLS = ("message", "spawn", "cron")
+        stashed = {name: self.tools.get(name) for name in _SIDE_EFFECT_TOOLS if self.tools.get(name)}
+        for name in stashed:
+            self.tools.unregister(name)
+
         async def _run_agent(prompt: str) -> tuple[str, list[str]]:
             msgs = self.context.build_messages([], prompt)
             result = await self._run_agent_loop(msgs)
@@ -591,9 +604,14 @@ class AgentLoop:
 
         try:
             report = await self._eval_runner.run(_run_agent)
-            logger.info("Eval run complete: {}/{} passed", report.passed, report.total)
+            if report is not None:
+                logger.info("Eval run complete: {}/{} passed", report.passed, report.total)
         except Exception:
             logger.exception("Eval run failed")
+        finally:
+            # Always restore stashed tools
+            for tool in stashed.values():
+                self.tools.register(tool)
 
     async def _process_message(
         self,
@@ -827,7 +845,8 @@ class AgentLoop:
         await self._save_turn(session, all_msgs, 1 + len(history), usage)
         self.sessions.save(session)
         if self._eval_runner and self._eval_runner.should_run_after_turn():
-            asyncio.create_task(self._run_eval_background())
+            if self._eval_task is None or self._eval_task.done():
+                self._eval_task = asyncio.create_task(self._run_eval_background())
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:

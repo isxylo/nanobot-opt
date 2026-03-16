@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 if TYPE_CHECKING:
     from nanobot.config.schema import EvalConfig
@@ -43,6 +44,10 @@ class EvalReport:
     def pass_rate(self) -> float:
         return self.passed / self.total if self.total else 0.0
 
+    @staticmethod
+    def _md_escape(s: str) -> str:
+        return s.replace("|", "\\|").replace("\n", " ").replace("\r", "")
+
     def to_markdown(self) -> str:
         lines = [
             f"## Eval Run — {self.run_at}",
@@ -53,9 +58,10 @@ class EvalReport:
         ]
         for r in self.results:
             status = "PASS" if r.passed else "FAIL"
-            tools = ", ".join(r.tools_used) or "-"
-            note = r.error[:60] if r.error else ""
-            lines.append(f"| {r.case_id} | {status} | {r.elapsed_ms} | {tools} | {note} |")
+            tools = self._md_escape(", ".join(r.tools_used) or "-")
+            note = self._md_escape(r.error[:60] if r.error else "")
+            case_id = self._md_escape(r.case_id)
+            lines.append(f"| {case_id} | {status} | {r.elapsed_ms} | {tools} | {note} |")
         lines.append("")
         return "\n".join(lines)
 
@@ -66,8 +72,18 @@ class EvalRunner:
     def __init__(self, config: EvalConfig, workspace: Path) -> None:
         self.config = config
         self.workspace = workspace
-        self.benchmark_file = workspace / config.benchmark_file
+        self.benchmark_file = self._resolve_benchmark_file(workspace, config.benchmark_file)
         self._turn_counter = 0
+        self._running_lock = asyncio.Lock()  # single-flight: at most one eval at a time
+        self._write_lock = asyncio.Lock()    # serialize file writes
+
+    @staticmethod
+    def _resolve_benchmark_file(workspace: Path, relative: str) -> Path:
+        """Resolve benchmark path and ensure it stays inside workspace."""
+        resolved = (workspace / relative).resolve()
+        if not str(resolved).startswith(str(workspace.resolve())):
+            raise ValueError(f"benchmark_file must be inside workspace, got: {relative}")
+        return resolved
 
     def should_run_after_turn(self) -> bool:
         """Return True if auto-trigger threshold has been reached."""
@@ -82,9 +98,20 @@ class EvalRunner:
     ) -> EvalReport:
         """Execute all benchmark cases and return a report.
 
+        Single-flight: if an eval is already running, skip and return None.
+
         Args:
             run_agent_fn: async (prompt) -> (response, tools_used)
         """
+        if self._running_lock.locked():
+            return None  # type: ignore[return-value]  # another eval already running
+        async with self._running_lock:
+            return await self._run_cases(run_agent_fn)
+
+    async def _run_cases(
+        self,
+        run_agent_fn: Callable[[str], Awaitable[tuple[str, list[str]]]],
+    ) -> EvalReport:
         results: list[EvalResult] = []
         for raw in self.config.suite:
             case = EvalCase(
@@ -121,7 +148,7 @@ class EvalRunner:
             failed=sum(1 for r in results if not r.passed),
             results=results,
         )
-        self._write_report(report)
+        await self._write_report(report)
         return report
 
     def _check(self, case: EvalCase, response: str, tools_used: list[str]) -> bool:
@@ -131,8 +158,9 @@ class EvalRunner:
             return False
         return True
 
-    def _write_report(self, report: EvalReport) -> None:
-        """Append the report to BENCHMARK.md, preserving history."""
-        self.benchmark_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.benchmark_file, "a", encoding="utf-8") as f:
-            f.write(report.to_markdown())
+    async def _write_report(self, report: EvalReport) -> None:
+        """Append the report to BENCHMARK.md, serialized to prevent concurrent corruption."""
+        async with self._write_lock:
+            self.benchmark_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.benchmark_file, "a", encoding="utf-8") as f:
+                f.write(report.to_markdown())
