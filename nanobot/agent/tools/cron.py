@@ -174,10 +174,13 @@ class CronTool(Tool):
             content = heartbeat_file.read_text(encoding="utf-8")
             lines = content.splitlines(keepends=True)
 
-            # Find ## Active Tasks section and move any task lines to ## Completed
+            # Find ## Active Tasks section and move ONLY matching entries to ## Completed
+            # Match by checking if key words from job_name appear in the task line
+            name_keywords = [w.lower() for w in re.split(r'\W+', job_name) if len(w) > 2]
             in_active = False
             moved: list[str] = []
             kept: list[str] = []
+            safe_name = job_name.replace('-->', '-').replace('\n', ' ')[:60]
             for line in lines:
                 if re.match(r'^##\s+Active Tasks', line):
                     in_active = True
@@ -186,9 +189,12 @@ class CronTool(Tool):
                     in_active = False
                     kept.append(line)
                 elif in_active and line.strip().startswith('-'):
-                    # Move task line to Completed with cron_managed annotation
-                    safe_name = job_name.replace('-->', '-').replace('\n', ' ')[:60]
-                    moved.append(f"- [cron_managed job_id={job_id}] {line.strip()[2:].strip()} (→ cron: {safe_name})\n")
+                    line_lower = line.lower()
+                    # Only move if line matches job_name keywords (at least 1 keyword hit)
+                    if name_keywords and any(kw in line_lower for kw in name_keywords):
+                        moved.append(f"- [cron_managed job_id={job_id}] {line.strip()[2:].strip()} (→ cron: {safe_name})\n")
+                    else:
+                        kept.append(line)
                 else:
                     kept.append(line)
 

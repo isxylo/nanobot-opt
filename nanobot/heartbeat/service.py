@@ -141,10 +141,17 @@ class HeartbeatService:
     def _filter_active_tasks(content: str) -> str:
         """Return only the Active Tasks section, excluding cron_managed lines.
 
+        If no ## Active Tasks section exists (legacy format), filter the full content.
         This prevents heartbeat from executing tasks already managed by cron.
         """
         import re
         lines = content.splitlines(keepends=True)
+        has_active_section = any(re.match(r'^##\s+Active Tasks', l) for l in lines)
+
+        if not has_active_section:
+            # Legacy format: filter out cron_managed from entire content
+            return "".join(l for l in lines if 'cron_managed' not in l).strip()
+
         in_active = False
         filtered: list[str] = []
         for line in lines:
@@ -204,7 +211,10 @@ class HeartbeatService:
         content = self._read_heartbeat_file()
         if not content:
             return None
-        action, tasks = await self._decide(content)
+        active_content = self._filter_active_tasks(content)
+        if not active_content or active_content.strip() == '## Active Tasks':
+            return None
+        action, tasks = await self._decide(active_content)
         if action != "run" or not self.on_execute:
             return None
         return await self.on_execute(tasks)
