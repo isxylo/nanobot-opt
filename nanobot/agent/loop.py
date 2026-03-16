@@ -259,6 +259,7 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_done: Callable[[str], Awaitable[None]] | None = None,
+        excluded_tools: frozenset[str] | None = None,
     ) -> tuple[str | None, list[str], list[dict], dict]:
         """Run the agent iteration loop."""
         messages = initial_messages
@@ -268,11 +269,15 @@ class AgentLoop:
         total_usage: dict[str, int] = {}
         last_finish_reason: str | None = None
         model = model_override or self.model
+        _excluded = excluded_tools or frozenset()
 
         while iteration < self.max_iterations:
             iteration += 1
 
-            tool_defs = self.tools.get_definitions()
+            tool_defs = [
+                d for d in self.tools.get_definitions()
+                if d.get("function", {}).get("name") not in _excluded
+            ] if _excluded else self.tools.get_definitions()
 
             response = await self.provider.chat_with_retry(
                 messages=messages,
@@ -308,7 +313,10 @@ class AgentLoop:
                 async def _exec_one(tc):
                     tools_used.append(tc.name)
                     logger.info("Tool call: {}({})", tc.name, json.dumps(tc.arguments, ensure_ascii=False)[:200])
-                    result = await self.tools.execute(tc.name, tc.arguments)
+                    if tc.name in _excluded:
+                        result = f"Tool '{tc.name}' is disabled in this context."
+                    else:
+                        result = await self.tools.execute(tc.name, tc.arguments)
                     return tc, result
 
                 all_parallel_safe = all(
@@ -587,18 +595,15 @@ class AgentLoop:
     async def _run_eval_background(self) -> None:
         """Run eval suite in background; results written to BENCHMARK.md.
 
-        Side-effect tools (message, spawn, cron) are temporarily disabled
-        during eval to prevent accidental outbound messages or task creation.
+        Side-effect tools (message, spawn, cron) are excluded via excluded_tools
+        to prevent accidental outbound messages or task creation, without
+        touching the global ToolRegistry (which would affect concurrent sessions).
         """
-        # Stash and remove side-effect tools for the duration of the eval
-        _SIDE_EFFECT_TOOLS = ("message", "spawn", "cron")
-        stashed = {name: self.tools.get(name) for name in _SIDE_EFFECT_TOOLS if self.tools.get(name)}
-        for name in stashed:
-            self.tools.unregister(name)
+        _SIDE_EFFECT_TOOLS = frozenset(("message", "spawn", "cron"))
 
         async def _run_agent(prompt: str) -> tuple[str, list[str]]:
             msgs = self.context.build_messages([], prompt)
-            result = await self._run_agent_loop(msgs)
+            result = await self._run_agent_loop(msgs, excluded_tools=_SIDE_EFFECT_TOOLS)
             content, tools_used = result[0], result[1]
             return content or "", tools_used
 
@@ -608,10 +613,6 @@ class AgentLoop:
                 logger.info("Eval run complete: {}/{} passed", report.passed, report.total)
         except Exception:
             logger.exception("Eval run failed")
-        finally:
-            # Always restore stashed tools
-            for tool in stashed.values():
-                self.tools.register(tool)
 
     async def _process_message(
         self,

@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
     from nanobot.config.schema import EvalConfig
@@ -81,7 +81,9 @@ class EvalRunner:
     def _resolve_benchmark_file(workspace: Path, relative: str) -> Path:
         """Resolve benchmark path and ensure it stays inside workspace."""
         resolved = (workspace / relative).resolve()
-        if not str(resolved).startswith(str(workspace.resolve())):
+        try:
+            resolved.relative_to(workspace.resolve())
+        except ValueError:
             raise ValueError(f"benchmark_file must be inside workspace, got: {relative}")
         return resolved
 
@@ -95,7 +97,7 @@ class EvalRunner:
     async def run(
         self,
         run_agent_fn: Callable[[str], Awaitable[tuple[str, list[str]]]],
-    ) -> EvalReport:
+    ) -> Optional["EvalReport"]:
         """Execute all benchmark cases and return a report.
 
         Single-flight: if an eval is already running, skip and return None.
