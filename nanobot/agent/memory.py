@@ -435,7 +435,7 @@ class MemoryStore:
                 return False
 
             date_str = datetime.now().strftime("%Y-%m-%d")
-            entry = f"- {rule} <!-- confidence:{confidence:.2f} added:{date_str} hits:0 -->"
+            entry = f"- {rule} <!-- confidence:{confidence:.2f} recency:{date_str} hits:0 -->"
             await self._append_lessons_async(entry)
             logger.info("Reflection: added lesson (confidence={:.2f})", confidence)
             return True
@@ -637,7 +637,12 @@ class MemoryConsolidator:
     ):
         lessons_path = None
         if memory_config and hasattr(memory_config, 'lessons_file'):
-            lessons_path = workspace / memory_config.lessons_file
+            candidate = (workspace / memory_config.lessons_file).resolve()
+            try:
+                candidate.relative_to(workspace.resolve())
+                lessons_path = candidate
+            except ValueError:
+                logger.warning("lessons_file '{}' is outside workspace, using default", memory_config.lessons_file)
         self.store = MemoryStore(workspace, lessons_file=lessons_path)
         self.provider = provider
         self.model = model
@@ -741,8 +746,9 @@ class MemoryConsolidator:
         # 2. Prune — acquire file lock
         if cfg.prune.enabled:
             try:
-                lines = len(self.store.memory_file.read_text(encoding="utf-8").splitlines()) \
-                    if self.store.memory_file.exists() else 0
+                prune_target = self.store.lessons_file if self.store.lessons_file.exists() else self.store.memory_file
+                lines = len(prune_target.read_text(encoding="utf-8").splitlines()) \
+                    if prune_target.exists() else 0
                 if lines >= cfg.prune.trigger_lines:
                     async with self.store._file_lock:
                         await asyncio.to_thread(

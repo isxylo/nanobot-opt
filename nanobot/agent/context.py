@@ -19,12 +19,13 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path, hybrid_memory: HybridMemoryContext | None = None):
+    def __init__(self, workspace: Path, hybrid_memory: HybridMemoryContext | None = None, lessons_file: Path | None = None):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self._hybrid_memory = hybrid_memory
         self.skills = SkillsLoader(workspace)
         self.skill_stats = SkillStats(workspace)
+        self._lessons_file = lessons_file or (workspace / "memory" / "lessons.md")
         # Cache fields: (cached_value, mtime_or_None)
         self._identity_cache: str | None = None
         self._bootstrap_cache: tuple[str, float] | None = None  # (content, max_mtime)
@@ -121,10 +122,9 @@ Skills with available="false" need dependencies installed first - you can try in
         return ""
 
     def _load_lessons(self) -> str:
-        """Load lessons.md from memory dir if it exists."""
-        lessons_file = self.workspace / "memory" / "lessons.md"
-        if lessons_file.exists():
-            return lessons_file.read_text(encoding="utf-8").strip()
+        """Load lessons file if it exists."""
+        if self._lessons_file.exists():
+            return self._lessons_file.read_text(encoding="utf-8").strip()
         return ""
 
     def _get_identity(self) -> str:
