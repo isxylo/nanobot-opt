@@ -11,10 +11,11 @@ from nanobot.cron.types import CronSchedule
 class CronTool(Tool):
     """Tool to schedule reminders and recurring tasks."""
 
-    def __init__(self, cron_service: CronService):
+    def __init__(self, cron_service: CronService, workspace: "Path | None" = None):
         self._cron = cron_service
         self._channel = ""
         self._chat_id = ""
+        self._workspace = workspace
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
     def set_context(self, channel: str, chat_id: str) -> None:
@@ -141,6 +142,7 @@ class CronTool(Tool):
             to=self._chat_id,
             delete_after_run=delete_after,
         )
+        self._mark_heartbeat_cron_managed(job.id, job.name)
         return f"Created job '{job.name}' (id: {job.id})"
 
     def _list_jobs(self) -> str:
@@ -156,3 +158,17 @@ class CronTool(Tool):
         if self._cron.remove_job(job_id):
             return f"Removed job {job_id}"
         return f"Job {job_id} not found"
+
+    def _mark_heartbeat_cron_managed(self, job_id: str, job_name: str) -> None:
+        """Append a cron_managed note to HEARTBEAT.md so heartbeat skips this task."""
+        if not self._workspace:
+            return
+        heartbeat_file = self._workspace / "HEARTBEAT.md"
+        if not heartbeat_file.exists():
+            return
+        try:
+            note = f"\n<!-- cron_managed: job_id={job_id} name={job_name!r} — managed by cron, heartbeat should skip -->\n"
+            with open(heartbeat_file, "a", encoding="utf-8") as f:
+                f.write(note)
+        except Exception:
+            pass  # Non-critical, don't break cron creation

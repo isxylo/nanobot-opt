@@ -5,6 +5,10 @@ Add tasks below that you want the agent to work on periodically.
 
 If this file has no tasks (only headers and comments), the agent will skip the heartbeat.
 
+**IMPORTANT**: Lines marked with `<!-- cron_managed: ... -->` are managed by the cron scheduler.
+Do NOT execute these tasks from heartbeat — they are already scheduled automatically.
+Only execute tasks listed under `## Active Tasks` that are NOT marked as cron_managed.
+
 ## Active Tasks
 
 <!-- Add your periodic tasks below this line -->
