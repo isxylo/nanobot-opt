@@ -400,6 +400,15 @@ class EvalConfig(Base):
     run_after_turns: int = 0  # Auto-trigger every N turns (0 = disabled)
 
 
+class SkillAutoGenConfig(Base):
+    """Dynamic skill generation configuration (P3 evolution feature)."""
+
+    enabled: bool = False  # Kill switch — disabled by default
+    min_pattern_count: int = Field(default=5, ge=1)  # Trigger after N identical command patterns
+    min_success_rate: float = Field(default=0.7, ge=0.0, le=1.0)  # Min success rate to generate
+    promote_after_uses: int = Field(default=3, ge=1)  # Promote draft after N successful uses
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
@@ -410,6 +419,7 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    skill_autogen: SkillAutoGenConfig = Field(default_factory=SkillAutoGenConfig)
 
 
 class Config(BaseSettings):

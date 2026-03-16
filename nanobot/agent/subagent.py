@@ -156,12 +156,22 @@ class SubagentManager:
                 final_result = "Task completed but no final response was generated."
 
             logger.info("Subagent [{}] completed successfully", task_id)
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+            experience = self._extract_experience(messages, label)
+            await self._announce_result(task_id, label, task, final_result, origin, "ok", experience)
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            await self._announce_result(task_id, label, task, error_msg, origin, "error", None)
+
+    def _extract_experience(self, messages: list[dict], label: str) -> str | None:
+        """Extract a brief experience summary from subagent messages (last assistant turn)."""
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                content = msg["content"]
+                if isinstance(content, str) and len(content) > 20:
+                    return f"[subagent:{label}] {content[:300]}"
+        return None
 
     async def _announce_result(
         self,
@@ -171,16 +181,21 @@ class SubagentManager:
         result: str,
         origin: dict[str, str],
         status: str,
+        experience: str | None = None,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         status_text = "completed successfully" if status == "ok" else "failed"
+
+        experience_section = ""
+        if experience:
+            experience_section = f"\n\n[Experience from subagent '{label}']\n{experience}\n(Main agent: if this contains a useful rule or heuristic, save it to memory candidates.)"
 
         announce_content = f"""[Subagent '{label}' {status_text}]
 
 Task: {task}
 
 Result:
-{result}
+{result}{experience_section}
 
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
 
