@@ -311,11 +311,11 @@ class AgentLoop:
 
                 # Execute tool calls: parallel if all are parallel_safe, else serial
                 async def _exec_one(tc):
-                    tools_used.append(tc.name)
                     logger.info("Tool call: {}({})", tc.name, json.dumps(tc.arguments, ensure_ascii=False)[:200])
                     if tc.name in _excluded:
                         result = f"Tool '{tc.name}' is disabled in this context."
                     else:
+                        tools_used.append(tc.name)
                         result = await self.tools.execute(tc.name, tc.arguments)
                     return tc, result
 
