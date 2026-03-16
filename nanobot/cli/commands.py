@@ -410,6 +410,7 @@ def gateway(
         channels_config=config.channels,
         router=router,
         memory_config=config.tools.memory,
+        eval_config=config.tools.eval,
     )
 
     # Set cron callback (needs agent)
@@ -598,6 +599,7 @@ def agent(
         channels_config=config.channels,
         router=router,
         memory_config=config.tools.memory,
+        eval_config=config.tools.eval,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on

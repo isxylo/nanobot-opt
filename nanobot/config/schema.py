@@ -373,6 +373,15 @@ class MemoryConfig(Base):
     fallback_to_file: bool = True
 
 
+class EvalConfig(Base):
+    """Evaluation baseline configuration (P0 evolution feature)."""
+
+    enabled: bool = False  # Kill switch — disabled by default
+    benchmark_file: str = "memory/BENCHMARK.md"  # Result path relative to workspace
+    suite: list[dict] = Field(default_factory=list)  # Benchmark task list
+    run_after_turns: int = 0  # Auto-trigger every N turns (0 = disabled)
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
@@ -382,6 +391,7 @@ class ToolsConfig(Base):
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    eval: EvalConfig = Field(default_factory=EvalConfig)
 
 
 class Config(BaseSettings):

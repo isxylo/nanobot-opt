@@ -103,6 +103,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         router: ModelRouter | None = None,
         memory_config=None,
+        eval_config=None,
     ):
         from nanobot.config.schema import BrowserToolsConfig, ExecToolConfig, MemoryConfig, WebSearchConfig
 
@@ -151,6 +152,10 @@ class AgentLoop:
         self._run_logger = RunLogger(workspace)
         self._memory_config = memory_config  # MemoryConfig | None
         self._hybrid_memory: HybridMemoryContext | None = None  # set after MCP connect
+        self._eval_runner = None
+        if eval_config and eval_config.enabled:
+            from nanobot.agent.eval import EvalRunner
+            self._eval_runner = EvalRunner(eval_config, workspace)
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -576,6 +581,20 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    async def _run_eval_background(self) -> None:
+        """Run eval suite in background; results written to BENCHMARK.md."""
+        async def _run_agent(prompt: str) -> tuple[str, list[str]]:
+            msgs = self.context.build_messages([], prompt)
+            result = await self._run_agent_loop(msgs)
+            content, tools_used = result[0], result[1]
+            return content or "", tools_used
+
+        try:
+            report = await self._eval_runner.run(_run_agent)
+            logger.info("Eval run complete: {}/{} passed", report.passed, report.total)
+        except Exception:
+            logger.exception("Eval run failed")
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -807,6 +826,8 @@ class AgentLoop:
         self._record_turn_metrics(session, elapsed_ms, had_error)
         await self._save_turn(session, all_msgs, 1 + len(history), usage)
         self.sessions.save(session)
+        if self._eval_runner and self._eval_runner.should_run_after_turn():
+            asyncio.create_task(self._run_eval_background())
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
