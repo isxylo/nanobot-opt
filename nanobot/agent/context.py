@@ -58,6 +58,10 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""")
 
+        lessons = self._load_lessons()
+        if lessons:
+            parts.append(f"# Lessons (Experience Rules)\n\n{lessons}")
+
         pitfalls = self._load_pitfalls()
         if pitfalls:
             parts.append(f"# Pitfalls (Avoid These)\n\n{pitfalls}")
@@ -114,6 +118,13 @@ Skills with available="false" need dependencies installed first - you can try in
         pitfalls_file = self.workspace / "memory" / "PITFALLS.md"
         if pitfalls_file.exists():
             return pitfalls_file.read_text(encoding="utf-8").strip()
+        return ""
+
+    def _load_lessons(self) -> str:
+        """Load lessons.md from memory dir if it exists."""
+        lessons_file = self.workspace / "memory" / "lessons.md"
+        if lessons_file.exists():
+            return lessons_file.read_text(encoding="utf-8").strip()
         return ""
 
     def _get_identity(self) -> str:

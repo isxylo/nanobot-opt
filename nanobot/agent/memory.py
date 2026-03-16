@@ -166,10 +166,11 @@ class MemoryStore:
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, lessons_file: Path | None = None):
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
+        self.lessons_file = lessons_file or (self.memory_dir / "lessons.md")
         self._consecutive_failures = 0
         self._file_lock = asyncio.Lock()  # serialises all reflect/promote/prune writes
 
@@ -435,12 +436,25 @@ class MemoryStore:
 
             date_str = datetime.now().strftime("%Y-%m-%d")
             entry = f"- {rule} <!-- confidence:{confidence:.2f} added:{date_str} hits:0 -->"
-            await self._append_candidates_async(entry)
-            logger.info("Reflection: added candidate rule (confidence={:.2f})", confidence)
+            await self._append_lessons_async(entry)
+            logger.info("Reflection: added lesson (confidence={:.2f})", confidence)
             return True
         except Exception:
             logger.exception("Reflection failed")
             return False
+
+    async def _append_lessons_async(self, entry: str) -> None:
+        """Append a lesson entry to lessons.md (separate from MEMORY.md)."""
+        async with self._file_lock:
+            await asyncio.to_thread(self._append_lessons, entry)
+
+    def _append_lessons(self, entry: str) -> None:
+        """Sync: append entry to lessons.md, creating header if needed."""
+        if not self.lessons_file.exists():
+            self.lessons_file.parent.mkdir(parents=True, exist_ok=True)
+            self.lessons_file.write_text("# Lessons\n\n", encoding="utf-8")
+        with open(self.lessons_file, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
 
     async def _append_candidates_async(self, entry: str) -> None:
         """Append an entry to the # candidates section in MEMORY.md, creating it if needed."""
@@ -531,13 +545,14 @@ class MemoryStore:
         return len(to_promote)
 
     def prune_memory(self, min_score: float = 0.3) -> int:
-        """Score and archive low-quality memory entries. Returns count pruned."""
-        if not self.memory_file.exists():
+        """Score and archive low-quality lesson entries from lessons.md. Returns count pruned."""
+        target_file = self.lessons_file if self.lessons_file.exists() else self.memory_file
+        if not target_file.exists():
             return 0
         import re
         from datetime import date
 
-        content = self.memory_file.read_text(encoding="utf-8")
+        content = target_file.read_text(encoding="utf-8")
         today = date.today()
         entry_pattern = re.compile(
             r'^(- .+<!-- (?:score:[0-9.]+ )?recency:(\S+) hits:(\d+)[^>]* -->)$',
@@ -573,7 +588,7 @@ class MemoryStore:
                     break
         content = "\n".join(lines) + "\n"
 
-        self.memory_file.write_text(content, encoding="utf-8")
+        target_file.write_text(content, encoding="utf-8")
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         archive_block = f"[{ts}] [PRUNED] {len(pruned)} low-score entries\n" + "\n".join(pruned)
@@ -620,7 +635,10 @@ class MemoryConsolidator:
         dual_write: bool = False,
         memory_config=None,
     ):
-        self.store = MemoryStore(workspace)
+        lessons_path = None
+        if memory_config and hasattr(memory_config, 'lessons_file'):
+            lessons_path = workspace / memory_config.lessons_file
+        self.store = MemoryStore(workspace, lessons_file=lessons_path)
         self.provider = provider
         self.model = model
         self.sessions = sessions

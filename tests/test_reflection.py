@@ -100,9 +100,9 @@ async def test_reflect_writes_candidate(tmp_path: Path) -> None:
     messages = [{"role": "user", "content": "run ls", "timestamp": "2026-03-16 10:00"}]
     ok = await store.reflect(messages, provider, "test-model")
     assert ok is True
-    content = store.memory_file.read_text()
+    content = store.lessons_file.read_text()
     assert "Always use exec for shell commands" in content
-    assert "# candidates" in content
+    assert "# Lessons" in content
 
 
 @pytest.mark.asyncio

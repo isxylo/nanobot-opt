@@ -387,6 +387,8 @@ class MemoryConfig(Base):
     mcp_server_name: str = "nocturne_memory"
     # Fallback to local MEMORY.md when MCP boot fails (hybrid/nocturne_mcp mode)
     fallback_to_file: bool = True
+    # Path (relative to workspace) for P1 reflection lessons — kept separate from MEMORY.md
+    lessons_file: str = "memory/lessons.md"
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
     prune: PruneConfig = Field(default_factory=PruneConfig)
 
