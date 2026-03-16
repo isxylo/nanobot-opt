@@ -304,10 +304,11 @@ class MemoryStore:
                 logger.warning("Memory consolidation: history_entry is empty after normalization")
                 return self._fail_or_raw_archive(messages)
 
-            await self.append_history_async(entry)
             update = _ensure_text(update)
-            if update != current_memory:
-                await self.write_long_term_async(update)
+            async with self._file_lock:
+                await self.append_history_async(entry)
+                if update != current_memory:
+                    await self.write_long_term_async(update)
 
             self._consecutive_failures = 0
             logger.info("Memory consolidation done for {} messages", len(messages))
@@ -563,16 +564,14 @@ class MemoryStore:
         if not pruned:
             return 0
 
-        # Remove by line index (first occurrence only) to avoid deleting duplicates
-        pruned_set = set(pruned)
-        new_lines = []
-        removed = set()
-        for line in content.splitlines():
-            if line in pruned_set and line not in removed:
-                removed.add(line)
-            else:
-                new_lines.append(line)
-        content = "\n".join(new_lines) + "\n"
+        # Remove each pruned entry exactly once (by occurrence count, like promote_candidates)
+        lines = content.splitlines()
+        for entry in pruned:
+            for i, line in enumerate(lines):
+                if line == entry:
+                    lines.pop(i)
+                    break
+        content = "\n".join(lines) + "\n"
 
         self.memory_file.write_text(content, encoding="utf-8")
 
