@@ -160,15 +160,48 @@ class CronTool(Tool):
         return f"Job {job_id} not found"
 
     def _mark_heartbeat_cron_managed(self, job_id: str, job_name: str) -> None:
-        """Append a cron_managed note to HEARTBEAT.md so heartbeat skips this task."""
+        """Move any Active Tasks entries from HEARTBEAT.md to Completed with cron_managed label.
+
+        This prevents HeartbeatService from executing tasks already managed by cron.
+        """
         if not self._workspace:
             return
         heartbeat_file = self._workspace / "HEARTBEAT.md"
         if not heartbeat_file.exists():
             return
         try:
-            note = f"\n<!-- cron_managed: job_id={job_id} name={job_name!r} — managed by cron, heartbeat should skip -->\n"
-            with open(heartbeat_file, "a", encoding="utf-8") as f:
-                f.write(note)
-        except Exception:
-            pass  # Non-critical, don't break cron creation
+            import re
+            content = heartbeat_file.read_text(encoding="utf-8")
+            lines = content.splitlines(keepends=True)
+
+            # Find ## Active Tasks section and move any task lines to ## Completed
+            in_active = False
+            moved: list[str] = []
+            kept: list[str] = []
+            for line in lines:
+                if re.match(r'^##\s+Active Tasks', line):
+                    in_active = True
+                    kept.append(line)
+                elif re.match(r'^##\s+', line):
+                    in_active = False
+                    kept.append(line)
+                elif in_active and line.strip().startswith('-'):
+                    # Move task line to Completed with cron_managed annotation
+                    safe_name = job_name.replace('-->', '-').replace('\n', ' ')[:60]
+                    moved.append(f"- [cron_managed job_id={job_id}] {line.strip()[2:].strip()} (→ cron: {safe_name})\n")
+                else:
+                    kept.append(line)
+
+            if moved:
+                new_content = "".join(kept)
+                # Append moved entries under ## Completed
+                completed_marker = '## Completed'
+                if completed_marker in new_content:
+                    insert_pos = new_content.index(completed_marker) + len(completed_marker)
+                    new_content = new_content[:insert_pos] + "\n\n" + "".join(moved) + new_content[insert_pos:]
+                else:
+                    new_content += f"\n## Completed\n\n" + "".join(moved)
+                heartbeat_file.write_text(new_content, encoding="utf-8")
+        except Exception as e:
+            from loguru import logger
+            logger.warning("CronTool: failed to update HEARTBEAT.md: {}", e)

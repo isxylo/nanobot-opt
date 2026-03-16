@@ -12,10 +12,10 @@ Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegr
 
 ## Heartbeat Tasks
 
-`HEARTBEAT.md` is checked on the configured heartbeat interval. Use file tools to manage periodic tasks:
+`HEARTBEAT.md` is checked on the configured heartbeat interval. Use it ONLY for tasks that have NO cron schedule.
 
-- **Add**: `edit_file` to append new tasks
+- **Add**: `edit_file` to append new tasks under `## Active Tasks`
 - **Remove**: `edit_file` to delete completed tasks
 - **Rewrite**: `write_file` to replace all tasks
 
-When the user asks for a recurring/periodic task, update `HEARTBEAT.md` instead of creating a one-time cron reminder.
+**IMPORTANT**: If a task is managed by the `cron` tool (has a cron schedule), do NOT add it to HEARTBEAT.md Active Tasks. The cron tool handles scheduling automatically. Adding cron tasks to HEARTBEAT.md causes duplicate execution.

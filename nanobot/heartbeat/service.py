@@ -137,6 +137,28 @@ class HeartbeatService:
             except Exception as e:
                 logger.error("Heartbeat error: {}", e)
 
+    @staticmethod
+    def _filter_active_tasks(content: str) -> str:
+        """Return only the Active Tasks section, excluding cron_managed lines.
+
+        This prevents heartbeat from executing tasks already managed by cron.
+        """
+        import re
+        lines = content.splitlines(keepends=True)
+        in_active = False
+        filtered: list[str] = []
+        for line in lines:
+            if re.match(r'^##\s+Active Tasks', line):
+                in_active = True
+                filtered.append(line)
+            elif re.match(r'^##\s+', line):
+                in_active = False
+            elif in_active:
+                # Skip cron_managed entries
+                if 'cron_managed' not in line:
+                    filtered.append(line)
+        return "".join(filtered).strip()
+
     async def _tick(self) -> None:
         """Execute a single heartbeat tick."""
         from nanobot.utils.evaluator import evaluate_response
@@ -146,10 +168,16 @@ class HeartbeatService:
             logger.debug("Heartbeat: HEARTBEAT.md missing or empty")
             return
 
+        # Only show Active Tasks (excluding cron_managed) to avoid duplicate execution
+        active_content = self._filter_active_tasks(content)
+        if not active_content or active_content.strip() == '## Active Tasks':
+            logger.debug("Heartbeat: no active tasks (all managed by cron or empty)")
+            return
+
         logger.info("Heartbeat: checking for tasks...")
 
         try:
-            action, tasks = await self._decide(content)
+            action, tasks = await self._decide(active_content)
 
             if action != "run":
                 logger.info("Heartbeat: OK (nothing to report)")
