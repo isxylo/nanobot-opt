@@ -341,12 +341,26 @@ This skill was auto-generated from repeated usage patterns.
 Review and edit before promoting to production.
 """
 
+    _SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,63}$')
+
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
         self._drafts_dir = workspace / "skills" / ".drafts"
 
+    def _validate_name(self, name: str) -> None:
+        """Raise ValueError if name is not a safe slug."""
+        if not self._SLUG_RE.match(name):
+            raise ValueError(f"Invalid skill name '{name}': must match [a-z0-9][a-z0-9_-]{{0,63}}")
+        # Resolve and verify the target stays inside _drafts_dir
+        target = (self._drafts_dir / name).resolve()
+        try:
+            target.relative_to(self._drafts_dir.resolve())
+        except ValueError:
+            raise ValueError(f"Skill name '{name}' resolves outside drafts directory")
+
     def write_draft(self, name: str, description: str, example_commands: list[str]) -> Path:
         """Write a new draft skill. Returns the path of the created SKILL.md."""
+        self._validate_name(name)
         draft_dir = self._drafts_dir / name
         draft_dir.mkdir(parents=True, exist_ok=True)
         skill_file = draft_dir / "SKILL.md"
@@ -362,6 +376,7 @@ Review and edit before promoting to production.
     def increment_uses(self, name: str) -> int:
         """Increment the use counter for a draft skill. Returns new count."""
         import re
+        self._validate_name(name)
         skill_file = self._drafts_dir / name / "SKILL.md"
         if not skill_file.exists():
             return 0
@@ -377,6 +392,7 @@ Review and edit before promoting to production.
     def get_uses(self, name: str) -> int:
         """Return the current use count for a draft skill."""
         import re
+        self._validate_name(name)
         skill_file = self._drafts_dir / name / "SKILL.md"
         if not skill_file.exists():
             return 0
@@ -388,6 +404,7 @@ Review and edit before promoting to production.
         """Promote a draft skill to the main skills directory."""
         import re
         import shutil
+        self._validate_name(name)
         draft_dir = self._drafts_dir / name
         target_dir = self.workspace / "skills" / name
         if not draft_dir.exists():
@@ -403,4 +420,8 @@ Review and edit before promoting to production.
         return skill_file
 
     def draft_exists(self, name: str) -> bool:
+        try:
+            self._validate_name(name)
+        except ValueError:
+            return False
         return (self._drafts_dir / name / "SKILL.md").exists()

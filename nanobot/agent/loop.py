@@ -104,6 +104,7 @@ class AgentLoop:
         router: ModelRouter | None = None,
         memory_config=None,
         eval_config=None,
+        skill_autogen_config=None,
     ):
         from nanobot.config.schema import BrowserToolsConfig, ExecToolConfig, MemoryConfig, WebSearchConfig
 
@@ -157,6 +158,8 @@ class AgentLoop:
         if eval_config and eval_config.enabled:
             from nanobot.agent.eval import EvalRunner
             self._eval_runner = EvalRunner(eval_config, workspace)
+        self._skill_autogen_config = skill_autogen_config  # SkillAutoGenConfig | None
+        self._command_patterns: dict[str, list[str]] = {}  # pattern -> [example_cmds]
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -334,6 +337,7 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tc.id, tc.name, result
                     )
+                    self._track_command_pattern(tc.name, tc.arguments)
             else:
                 clean = self._strip_think(response.content)
                 # Don't persist error responses to session history — they can
@@ -593,6 +597,65 @@ class AgentLoop:
             self._eval_task.cancel()
         logger.info("Agent loop stopping")
 
+    def _track_command_pattern(self, tool_name: str, arguments: dict) -> None:
+        """Track repeated command patterns for potential skill auto-generation."""
+        if not self._skill_autogen_config or not self._skill_autogen_config.enabled:
+            return
+        # Only track shell/exec tools
+        if tool_name not in ("exec", "shell", "bash"):
+            return
+        # Normalize: extract command name + first subcommand
+        cmd = ""
+        for key in ("command", "cmd", "code"):
+            if key in arguments and isinstance(arguments[key], str):
+                cmd = arguments[key].strip().split()[0] if arguments[key].strip() else ""
+                break
+        if not cmd:
+            return
+        pattern = f"{tool_name}:{cmd}"
+        examples = self._command_patterns.setdefault(pattern, [])
+        full_cmd = arguments.get("command") or arguments.get("cmd") or arguments.get("code") or ""
+        if full_cmd and full_cmd not in examples:
+            examples.append(full_cmd[:120])
+
+    def _maybe_generate_skill(self) -> None:
+        """Check if any command pattern has reached the threshold and generate a draft skill."""
+        cfg = self._skill_autogen_config
+        if not cfg or not cfg.enabled:
+            return
+        from nanobot.agent.skills import SkillWriter
+        writer = SkillWriter(self.workspace)
+        for pattern, examples in list(self._command_patterns.items()):
+            if len(examples) < cfg.min_pattern_count:
+                continue
+            # Derive a skill name from the pattern (e.g. exec:git -> exec-git)
+            skill_name = pattern.replace(":", "-").replace("_", "-").lower()
+            # Skip if already exists as draft or promoted
+            if writer.draft_exists(skill_name):
+                uses = writer.get_uses(skill_name)
+                if uses >= cfg.promote_after_uses:
+                    try:
+                        writer.promote(skill_name)
+                        logger.info("Auto-promoted skill '{}' after {} uses", skill_name, uses)
+                    except (FileExistsError, ValueError):
+                        pass
+                continue
+            if self.context.skills.load_skill(skill_name):
+                continue
+            # Check success rate from skill_stats
+            rate = self.context.skill_stats.success_rate(skill_name)
+            if rate > 0 and rate < cfg.min_success_rate:
+                continue
+            try:
+                writer.write_draft(
+                    name=skill_name,
+                    description=f"Auto-generated skill for repeated '{pattern}' commands",
+                    example_commands=examples[:5],
+                )
+                logger.info("Auto-generated draft skill '{}'", skill_name)
+            except ValueError:
+                pass  # Invalid name, skip
+
     async def _run_eval_background(self) -> None:
         """Run eval suite in background; results written to BENCHMARK.md.
 
@@ -849,6 +912,7 @@ class AgentLoop:
         for tool_name in tools_used:
             if self.context.skills.load_skill(tool_name) is not None:
                 asyncio.create_task(self.context.skill_stats.record_async(tool_name))
+        self._maybe_generate_skill()
         if self._eval_runner and self._eval_runner.should_run_after_turn():
             if self._eval_task is None or self._eval_task.done():
                 self._eval_task = asyncio.create_task(self._run_eval_background())

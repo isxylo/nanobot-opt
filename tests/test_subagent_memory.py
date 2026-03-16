@@ -75,7 +75,7 @@ async def test_announce_result_includes_experience(tmp_path) -> None:
     )
     mgr.bus.publish_inbound.assert_called_once()
     msg = mgr.bus.publish_inbound.call_args[0][0]
-    assert "Experience from subagent" in msg.content
+    assert "untrusted-data" in msg.content
     assert "useful heuristic here" in msg.content
 
 

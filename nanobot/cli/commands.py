@@ -411,6 +411,7 @@ def gateway(
         router=router,
         memory_config=config.tools.memory,
         eval_config=config.tools.eval,
+        skill_autogen_config=config.tools.skill_autogen,
     )
 
     # Set cron callback (needs agent)
@@ -600,6 +601,7 @@ def agent(
         router=router,
         memory_config=config.tools.memory,
         eval_config=config.tools.eval,
+        skill_autogen_config=config.tools.skill_autogen,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
