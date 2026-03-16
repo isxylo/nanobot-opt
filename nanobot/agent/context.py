@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.memory import HybridMemoryContext, MemoryStore
-from nanobot.agent.skills import SkillsLoader
+from nanobot.agent.skills import SkillStats, SkillsLoader
 from nanobot.utils.helpers import build_assistant_message, detect_image_mime
 
 
@@ -24,6 +24,7 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self._hybrid_memory = hybrid_memory
         self.skills = SkillsLoader(workspace)
+        self.skill_stats = SkillStats(workspace)
         # Cache fields: (cached_value, mtime_or_None)
         self._identity_cache: str | None = None
         self._bootstrap_cache: tuple[str, float] | None = None  # (content, max_mtime)
@@ -56,6 +57,10 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
+
+        pitfalls = self._load_pitfalls()
+        if pitfalls:
+            parts.append(f"# Pitfalls (Avoid These)\n\n{pitfalls}")
 
         return "\n\n---\n\n".join(parts)
 
@@ -100,9 +105,16 @@ Skills with available="false" need dependencies installed first - you can try in
         mtime = self._get_skills_mtime()
         if self._skills_summary_cache is not None and self._skills_summary_cache[1] == mtime:
             return self._skills_summary_cache[0]
-        content = self.skills.build_skills_summary()
+        content = self.skills.build_skills_summary(skill_stats=self.skill_stats)
         self._skills_summary_cache = (content, mtime)
         return content
+
+    def _load_pitfalls(self) -> str:
+        """Load PITFALLS.md from memory dir if it exists."""
+        pitfalls_file = self.workspace / "memory" / "PITFALLS.md"
+        if pitfalls_file.exists():
+            return pitfalls_file.read_text(encoding="utf-8").strip()
+        return ""
 
     def _get_identity(self) -> str:
         """Get the core identity section (cached — static content)."""

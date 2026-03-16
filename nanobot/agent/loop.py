@@ -165,6 +165,7 @@ class AgentLoop:
             context_window_tokens=context_window_tokens,
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
+            memory_config=memory_config,
         )
         self._register_default_tools()
 
@@ -813,7 +814,7 @@ class AgentLoop:
             nonlocal _stream_done_sent
             _stream_done_sent = True
             await _bus_stream_done(content)
-        final_content, _, all_msgs, usage, finish_reason = await self._run_agent_loop(
+        final_content, tools_used, all_msgs, usage, finish_reason = await self._run_agent_loop(
             initial_messages,
             model_override=model_to_use,
             on_progress=on_progress or _bus_progress,
@@ -845,6 +846,9 @@ class AgentLoop:
         self._record_turn_metrics(session, elapsed_ms, had_error)
         await self._save_turn(session, all_msgs, 1 + len(history), usage)
         self.sessions.save(session)
+        for tool_name in tools_used:
+            if self.context.skills.load_skill(tool_name) is not None:
+                self.context.skill_stats.record(tool_name, success=not had_error)
         if self._eval_runner and self._eval_runner.should_run_after_turn():
             if self._eval_task is None or self._eval_task.done():
                 self._eval_task = asyncio.create_task(self._run_eval_background())

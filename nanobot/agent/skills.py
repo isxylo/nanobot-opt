@@ -1,13 +1,59 @@
 """Skills loader for agent capabilities."""
 
 import json
+import math
 import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
+
+
+class SkillStats:
+    """Tracks skill usage frequency and success rate in skills/SKILL_STATS.json."""
+
+    def __init__(self, workspace: Path) -> None:
+        self._path = workspace / "skills" / "SKILL_STATS.json"
+        self._data: dict = self._load()
+
+    def _load(self) -> dict:
+        if self._path.exists():
+            try:
+                return json.loads(self._path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def record(self, skill_name: str, success: bool) -> None:
+        """Record one invocation of a skill."""
+        entry = self._data.setdefault(skill_name, {"calls": 0, "success": 0, "last_used": ""})
+        entry["calls"] += 1
+        if success:
+            entry["success"] += 1
+        entry["last_used"] = datetime.now().strftime("%Y-%m-%d")
+        self._save()
+
+    def success_rate(self, skill_name: str) -> float:
+        entry = self._data.get(skill_name)
+        if not entry or entry["calls"] == 0:
+            return 0.0
+        return entry["success"] / entry["calls"]
+
+    def sorted_by_priority(self, skill_names: list[str]) -> list[str]:
+        """Sort skills by composite score: success_rate * log(calls+1), desc."""
+        def score(name: str) -> float:
+            entry = self._data.get(name)
+            if not entry:
+                return 0.0
+            return self.success_rate(name) * math.log(entry["calls"] + 1)
+        return sorted(skill_names, key=score, reverse=True)
 
 
 class SkillsLoader:
@@ -98,12 +144,15 @@ class SkillsLoader:
 
         return "\n\n---\n\n".join(parts) if parts else ""
 
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, skill_stats: "SkillStats | None" = None) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
 
         This is used for progressive loading - the agent can read the full
         skill content using read_file when needed.
+
+        Args:
+            skill_stats: Optional SkillStats to sort high-priority skills first.
 
         Returns:
             XML-formatted skills summary.
@@ -111,6 +160,12 @@ class SkillsLoader:
         all_skills = self.list_skills(filter_unavailable=False)
         if not all_skills:
             return ""
+
+        if skill_stats:
+            skill_names = [s["name"] for s in all_skills]
+            ordered = skill_stats.sorted_by_priority(skill_names)
+            skill_map = {s["name"]: s for s in all_skills}
+            all_skills = [skill_map[n] for n in ordered]
 
         def escape_xml(s: str) -> str:
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
