@@ -139,32 +139,40 @@ class HeartbeatService:
 
     @staticmethod
     def _filter_active_tasks(content: str) -> str:
-        """Return only the Active Tasks section, excluding cron_managed lines.
+        """Return only real task lines from Active Tasks section, excluding cron_managed and comments.
 
-        If no ## Active Tasks section exists (legacy format), filter the full content.
-        This prevents heartbeat from executing tasks already managed by cron.
+        A real task line starts with '- ' and is not a comment or cron_managed marker.
+        Returns only the task lines (not the heading), empty string if none found.
+        If no ## Active Tasks section exists (legacy format), scan the full content.
         """
         import re
         lines = content.splitlines(keepends=True)
         has_active_section = any(re.match(r'^##\s+Active Tasks', l) for l in lines)
 
+        def _is_real_task(line: str) -> bool:
+            stripped = line.strip()
+            if not stripped.startswith('-'):
+                return False
+            if 'cron_managed' in stripped:
+                return False
+            if stripped.startswith('<!--') or stripped.startswith('- <!--'):
+                return False
+            return True
+
         if not has_active_section:
-            # Legacy format: filter out cron_managed from entire content
-            return "".join(l for l in lines if 'cron_managed' not in l).strip()
+            # Legacy format: scan full content for real task lines
+            return "".join(l for l in lines if _is_real_task(l)).strip()
 
         in_active = False
-        filtered: list[str] = []
+        task_lines: list[str] = []
         for line in lines:
             if re.match(r'^##\s+Active Tasks', line):
                 in_active = True
-                filtered.append(line)
             elif re.match(r'^##\s+', line):
                 in_active = False
-            elif in_active:
-                # Skip cron_managed entries
-                if 'cron_managed' not in line:
-                    filtered.append(line)
-        return "".join(filtered).strip()
+            elif in_active and _is_real_task(line):
+                task_lines.append(line)
+        return "".join(task_lines).strip()
 
     async def _tick(self) -> None:
         """Execute a single heartbeat tick."""
@@ -175,9 +183,9 @@ class HeartbeatService:
             logger.debug("Heartbeat: HEARTBEAT.md missing or empty")
             return
 
-        # Only show Active Tasks (excluding cron_managed) to avoid duplicate execution
+        # Only process real task lines (excludes cron_managed, comments, headings)
         active_content = self._filter_active_tasks(content)
-        if not active_content or active_content.strip() == '## Active Tasks':
+        if not active_content:
             logger.debug("Heartbeat: no active tasks (all managed by cron or empty)")
             return
 
@@ -212,7 +220,7 @@ class HeartbeatService:
         if not content:
             return None
         active_content = self._filter_active_tasks(content)
-        if not active_content or active_content.strip() == '## Active Tasks':
+        if not active_content:
             return None
         action, tasks = await self._decide(active_content)
         if action != "run" or not self.on_execute:
